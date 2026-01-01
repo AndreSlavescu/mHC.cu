@@ -24,18 +24,9 @@ void rmsnorm_cpu(float* out, const float* inp, const floatX* weight, int B, int 
     }
 }
 
-void mhc_layer_cpu_reference(
-    float* out,
-    const float* x_expanded,
-    const float* H_pre,
-    const float* H_post,
-    const float* M,
-    const floatX* rmsnorm_weight,
-    int B,
-    int n,
-    int C,
-    float eps
-) {
+void mhc_layer_cpu_reference(float* out, const float* x_expanded, const float* H_pre,
+                             const float* H_post, const float* M, const floatX* rmsnorm_weight,
+                             int B, int n, int C, float eps) {
     float* x_agg = (float*)malloc(B * C * sizeof(float));
     float* x_normed = (float*)malloc(B * C * sizeof(float));
     float* y_dist = (float*)malloc(B * n * C * sizeof(float));
@@ -149,8 +140,8 @@ int main() {
     }
 
     sinkhorn_cpu(h_M, n, 20);
-    mhc_layer_cpu_reference(h_out_ref, h_x_expanded, h_H_pre, h_H_post, h_M,
-                            h_rmsnorm_weight, B, n, C, 1e-5f);
+    mhc_layer_cpu_reference(h_out_ref, h_x_expanded, h_H_pre, h_H_post, h_M, h_rmsnorm_weight, B, n,
+                            C, 1e-5f);
 
     MHCLayerConfig config;
     config.batch_size = B;
@@ -172,7 +163,8 @@ int main() {
     layer.forward(h_x_expanded);
     layer.sync();
 
-    CHECK_CUDA(cudaMemcpy(h_out_gpu, layer.get_output(), B * n * C * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_out_gpu, layer.get_output(), B * n * C * sizeof(float),
+                          cudaMemcpyDeviceToHost));
 
     printf("\nForward pass completed!\n");
 

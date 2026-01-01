@@ -7,16 +7,9 @@
 using namespace mhc;
 
 template<int MAX_DIM, int BLOCK_SIZE, bool DO_PROFILE>
-__global__ void sinkhorn_knopp_profiled_kernel(
-    float* __restrict__ out,
-    const float* __restrict__ inp,
-    int M,
-    int N,
-    int num_iters,
-    float eps,
-    int64_t* profiler_buf,
-    int max_entries
-) {
+__global__ void
+sinkhorn_knopp_profiled_kernel(float* __restrict__ out, const float* __restrict__ inp, int M, int N,
+                               int num_iters, float eps, int64_t* profiler_buf, int max_entries) {
     extern __shared__ float smem[];
     float* tile = smem;
     float* row_sums = smem + MAX_DIM * MAX_DIM;
@@ -120,15 +113,8 @@ int main() {
     };
 
     Config configs[] = {
-        {32, 32, 5},
-        {32, 32, 10},
-        {32, 32, 20},
-        {64, 64, 5},
-        {64, 64, 10},
-        {64, 64, 20},
-        {128, 128, 5},
-        {128, 128, 10},
-        {128, 128, 20},
+        {32, 32, 5},  {32, 32, 10},  {32, 32, 20},   {64, 64, 5},    {64, 64, 10},
+        {64, 64, 20}, {128, 128, 5}, {128, 128, 10}, {128, 128, 20},
     };
     int num_configs = sizeof(configs) / sizeof(configs[0]);
 
@@ -156,7 +142,8 @@ int main() {
 
         constexpr int BLOCK_SIZE = 256;
         constexpr int MAX_DIM = 128;
-        size_t smem_size = MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
 
         auto kernel = sinkhorn_knopp_profiled_kernel<MAX_DIM, BLOCK_SIZE, false>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
@@ -201,7 +188,8 @@ int main() {
 
         constexpr int BLOCK_SIZE = 256;
         constexpr int MAX_DIM = 128;
-        size_t smem_size = MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
 
         auto kernel = sinkhorn_knopp_profiled_kernel<MAX_DIM, BLOCK_SIZE, true>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
@@ -209,7 +197,8 @@ int main() {
         HostProfiler profiler(1, max_entries);
 
         flusher.flush();
-        kernel<<<1, BLOCK_SIZE, smem_size>>>(d_out, d_inp, M, N, num_iters, eps, profiler.device_ptr(), max_entries);
+        kernel<<<1, BLOCK_SIZE, smem_size>>>(d_out, d_inp, M, N, num_iters, eps,
+                                             profiler.device_ptr(), max_entries);
         CHECK_CUDA(cudaDeviceSynchronize());
 
         profiler.print_summary();

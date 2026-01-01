@@ -24,13 +24,8 @@ struct MatmulDescriptors {
     size_t workspace_size;
 };
 
-inline void init_matmul_descriptors(
-    MatmulDescriptors& desc,
-    int M,
-    int N,
-    int K,
-    size_t workspace_size = 32 * 1024 * 1024
-) {
+inline void init_matmul_descriptors(MatmulDescriptors& desc, int M, int N, int K,
+                                    size_t workspace_size = 32 * 1024 * 1024) {
     CHECK_CUBLAS(cublasLtCreate(&desc.handle));
 
     cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
@@ -42,24 +37,23 @@ inline void init_matmul_descriptors(
 
     cublasOperation_t trans_a = CUBLAS_OP_N;
     cublasOperation_t trans_b = CUBLAS_OP_N;
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        desc.matmul_desc, CUBLASLT_MATMUL_DESC_TRANSA, &trans_a, sizeof(trans_a)));
-    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
-        desc.matmul_desc, CUBLASLT_MATMUL_DESC_TRANSB, &trans_b, sizeof(trans_b)));
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(desc.matmul_desc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                                &trans_a, sizeof(trans_a)));
+    CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(desc.matmul_desc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                                &trans_b, sizeof(trans_b)));
 
     CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&desc.A_desc, ab_type, M, K, M));
     CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&desc.B_desc, ab_type, K, N, K));
     CHECK_CUBLAS(cublasLtMatrixLayoutCreate(&desc.C_desc, c_type, M, N, M));
 
     CHECK_CUBLAS(cublasLtMatmulPreferenceCreate(&desc.preference));
-    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(
-        desc.preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-        &workspace_size, sizeof(workspace_size)));
+    CHECK_CUBLAS(cublasLtMatmulPreferenceSetAttribute(desc.preference,
+                                                      CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                      &workspace_size, sizeof(workspace_size)));
 
     int returned_results = 0;
     CHECK_CUBLAS(cublasLtMatmulAlgoGetHeuristic(
-        desc.handle, desc.matmul_desc,
-        desc.A_desc, desc.B_desc, desc.C_desc, desc.C_desc,
+        desc.handle, desc.matmul_desc, desc.A_desc, desc.B_desc, desc.C_desc, desc.C_desc,
         desc.preference, 1, &desc.heuristic, &returned_results));
 
     if (returned_results == 0) {
@@ -81,29 +75,11 @@ inline void destroy_matmul_descriptors(MatmulDescriptors& desc) {
     cudaFree(desc.workspace);
 }
 
-inline void matmul_forward(
-    MatmulDescriptors& desc,
-    floatX* out,
-    const floatX* A,
-    const floatX* B,
-    float alpha,
-    float beta,
-    cudaStream_t stream = nullptr
-) {
-    CHECK_CUBLAS(cublasLtMatmul(
-        desc.handle,
-        desc.matmul_desc,
-        &alpha,
-        A, desc.A_desc,
-        B, desc.B_desc,
-        &beta,
-        out, desc.C_desc,
-        out, desc.C_desc,
-        &desc.heuristic.algo,
-        desc.workspace,
-        desc.workspace_size,
-        stream
-    ));
+inline void matmul_forward(MatmulDescriptors& desc, floatX* out, const floatX* A, const floatX* B,
+                           float alpha, float beta, cudaStream_t stream = nullptr) {
+    CHECK_CUBLAS(cublasLtMatmul(desc.handle, desc.matmul_desc, &alpha, A, desc.A_desc, B,
+                                desc.B_desc, &beta, out, desc.C_desc, out, desc.C_desc,
+                                &desc.heuristic.algo, desc.workspace, desc.workspace_size, stream));
 }
 
 struct FusedRMSNormMatmul {
@@ -137,13 +113,8 @@ struct FusedRMSNormMatmul {
         }
     }
 
-    void forward(
-        floatX* out,
-        const floatX* inp,
-        const floatX* weight,
-        const floatX* proj_weight,
-        cudaStream_t stream = nullptr
-    ) {
+    void forward(floatX* out, const floatX* inp, const floatX* weight, const floatX* proj_weight,
+                 cudaStream_t stream = nullptr) {
         rmsnorm_forward_with_rms(norm_buffer, rms_buffer, inp, weight, M, K, eps, stream);
         matmul_forward(matmul_desc, out, norm_buffer, proj_weight, 1.0f, 0.0f, stream);
     }
@@ -152,20 +123,15 @@ struct FusedRMSNormMatmul {
 };
 
 template<int BLOCK_SIZE>
-__global__ void rmsnorm_pdl_kernel(
-    floatX* __restrict__ out,
-    float* __restrict__ rms_out,
-    const floatX* __restrict__ inp,
-    const floatX* __restrict__ weight,
-    int N,
-    int C,
-    float eps
-) {
+__global__ void rmsnorm_pdl_kernel(floatX* __restrict__ out, float* __restrict__ rms_out,
+                                   const floatX* __restrict__ inp,
+                                   const floatX* __restrict__ weight, int N, int C, float eps) {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
     int idx = blockIdx.x;
-    if (idx >= N) return;
+    if (idx >= N)
+        return;
 
     const floatX* x = inp + idx * C;
     floatX* o = out + idx * C;
@@ -198,7 +164,8 @@ __global__ void rmsnorm_pdl_kernel(
             float rms = sqrtf(block_sum / (float)C + eps);
             float rms_inv = 1.0f / rms;
             s_sum_sq[0] = rms_inv;
-            if (rms_out) rms_out[idx] = rms;
+            if (rms_out)
+                rms_out[idx] = rms;
         }
     }
     __syncthreads();
@@ -218,16 +185,9 @@ __global__ void rmsnorm_pdl_kernel(
     }
 }
 
-inline void rmsnorm_forward_pdl(
-    floatX* out,
-    float* rms_out,
-    const floatX* inp,
-    const floatX* weight,
-    int N,
-    int C,
-    float eps,
-    cudaStream_t stream = nullptr
-) {
+inline void rmsnorm_forward_pdl(floatX* out, float* rms_out, const floatX* inp,
+                                const floatX* weight, int N, int C, float eps,
+                                cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 512;
     int num_warps = BLOCK_SIZE / 32;
     size_t shared_mem = num_warps * sizeof(float);
@@ -248,15 +208,11 @@ inline void rmsnorm_forward_pdl(
     config.attrs = attrs;
     config.numAttrs = 1;
 
-    CHECK_CUDA(cudaLaunchKernelEx(
-        &config,
-        rmsnorm_pdl_kernel<BLOCK_SIZE>,
-        out, rms_out, inp, weight, N, C, eps
-    ));
+    CHECK_CUDA(cudaLaunchKernelEx(&config, rmsnorm_pdl_kernel<BLOCK_SIZE>, out, rms_out, inp,
+                                  weight, N, C, eps));
 #else
-    rmsnorm_pdl_kernel<BLOCK_SIZE><<<grid, block, shared_mem, stream>>>(
-        out, rms_out, inp, weight, N, C, eps
-    );
+    rmsnorm_pdl_kernel<BLOCK_SIZE>
+        <<<grid, block, shared_mem, stream>>>(out, rms_out, inp, weight, N, C, eps);
 #endif
 }
 
@@ -291,17 +247,12 @@ struct FusedRMSNormMatmulPDL {
         }
     }
 
-    void forward(
-        floatX* out,
-        const floatX* inp,
-        const floatX* weight,
-        const floatX* proj_weight,
-        cudaStream_t stream = nullptr
-    ) {
+    void forward(floatX* out, const floatX* inp, const floatX* weight, const floatX* proj_weight,
+                 cudaStream_t stream = nullptr) {
         rmsnorm_forward_pdl(norm_buffer, rms_buffer, inp, weight, M, K, eps, stream);
         matmul_forward(matmul_desc, out, norm_buffer, proj_weight, 1.0f, 0.0f, stream);
     }
 
     float* get_rms_values() { return rms_buffer; }
 };
-}
+} // namespace mhc

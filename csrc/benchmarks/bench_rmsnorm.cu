@@ -11,21 +11,15 @@ namespace cg = cooperative_groups;
 using namespace mhc;
 
 template<int BLOCK_SIZE, bool DO_PROFILE>
-__global__ void rmsnorm_profiled_kernel(
-    floatX* __restrict__ out,
-    const floatX* __restrict__ inp,
-    const floatX* __restrict__ weight,
-    int N,
-    int C,
-    float eps,
-    int64_t* profiler_buf,
-    int max_entries
-) {
+__global__ void rmsnorm_profiled_kernel(floatX* __restrict__ out, const floatX* __restrict__ inp,
+                                        const floatX* __restrict__ weight, int N, int C, float eps,
+                                        int64_t* profiler_buf, int max_entries) {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
     int idx = blockIdx.x;
-    if (idx >= N) return;
+    if (idx >= N)
+        return;
 
     DeviceProfiler profiler;
     if constexpr (DO_PROFILE) {
@@ -107,13 +101,8 @@ int main() {
     L2Flusher flusher;
 
     int configs[][2] = {
-        {128, 4096},
-        {256, 4096},
-        {512, 4096},
-        {1024, 4096},
-        {2048, 4096},
-        {1024, 8192},
-        {2048, 8192},
+        {128, 4096},  {256, 4096},  {512, 4096},  {1024, 4096},
+        {2048, 4096}, {1024, 8192}, {2048, 8192},
     };
     int num_configs = sizeof(configs) / sizeof(configs[0]);
 
@@ -160,9 +149,8 @@ int main() {
             flusher.flush();
 
             timer.record_start();
-            rmsnorm_profiled_kernel<BLOCK_SIZE, false><<<N, BLOCK_SIZE, shared_mem>>>(
-                d_out, d_inp, d_weight, N, C, eps, nullptr, 0
-            );
+            rmsnorm_profiled_kernel<BLOCK_SIZE, false>
+                <<<N, BLOCK_SIZE, shared_mem>>>(d_out, d_inp, d_weight, N, C, eps, nullptr, 0);
             timer.record_stop();
             total_time += timer.elapsed_ms();
         }
@@ -210,8 +198,7 @@ int main() {
 
         flusher.flush();
         rmsnorm_profiled_kernel<BLOCK_SIZE, true><<<N, BLOCK_SIZE, shared_mem>>>(
-            d_out, d_inp, d_weight, N, C, eps, profiler.device_ptr(), max_entries
-        );
+            d_out, d_inp, d_weight, N, C, eps, profiler.device_ptr(), max_entries);
         CHECK_CUDA(cudaDeviceSynchronize());
 
         profiler.print_summary();

@@ -9,7 +9,8 @@
 
 using namespace mhc;
 
-void rmsnorm_cpu_reference(float* out, const float* inp, const float* weight, int N, int C, float eps) {
+void rmsnorm_cpu_reference(float* out, const float* inp, const float* weight, int N, int C,
+                           float eps) {
     for (int i = 0; i < N; i++) {
         float sum_sq = 0.0f;
         for (int j = 0; j < C; j++) {

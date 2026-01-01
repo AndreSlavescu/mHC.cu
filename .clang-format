@@ -41,4 +41,3 @@ KeepEmptyLinesAtTheStartOfBlocks: false
 
 Cpp11BracedListStyle: true
 SpaceBeforeCpp11BracedList: false
-

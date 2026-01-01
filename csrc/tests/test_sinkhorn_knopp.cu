@@ -8,7 +8,8 @@
 
 using namespace mhc;
 
-void sinkhorn_knopp_cpu_reference(float* out, const float* inp, int M, int N, int num_iters, float eps) {
+void sinkhorn_knopp_cpu_reference(float* out, const float* inp, int M, int N, int num_iters,
+                                  float eps) {
     for (int i = 0; i < M * N; i++) {
         out[i] = inp[i];
     }
@@ -48,7 +49,8 @@ float check_row_sums(const float* mat, int M, int N) {
             sum += mat[r * N + c];
         }
         float err = fabsf(sum - 1.0f);
-        if (err > max_err) max_err = err;
+        if (err > max_err)
+            max_err = err;
     }
     return max_err;
 }
@@ -61,7 +63,8 @@ float check_col_sums(const float* mat, int M, int N) {
             sum += mat[r * N + c];
         }
         float err = fabsf(sum - 1.0f);
-        if (err > max_err) max_err = err;
+        if (err > max_err)
+            max_err = err;
     }
     return max_err;
 }
@@ -104,7 +107,8 @@ int main() {
     const float tolerance = 1e-5f;
     const float doubly_stochastic_tol = 1e-4f;
 
-    bool passed = (max_diff < tolerance && row_err < doubly_stochastic_tol && col_err < doubly_stochastic_tol);
+    bool passed = (max_diff < tolerance && row_err < doubly_stochastic_tol &&
+                   col_err < doubly_stochastic_tol);
     check_test(passed ? 0.0f : 1.0f, 0.5f, "32x32");
 
     printf("\nTesting 64x64...\n");

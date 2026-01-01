@@ -38,4 +38,4 @@ inline void check_cublas(cublasStatus_t status, const char* file, int line) {
 
 #define CHECK_CUDA(call) mhc::check_cuda((call), __FILE__, __LINE__)
 #define CHECK_CUBLAS(call) mhc::check_cublas((call), __FILE__, __LINE__)
-}
+} // namespace mhc

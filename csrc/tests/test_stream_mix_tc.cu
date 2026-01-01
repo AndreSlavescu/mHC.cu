@@ -8,14 +8,7 @@
 
 using namespace mhc;
 
-void stream_mix_cpu_reference(
-    float* out,
-    const float* inp,
-    const float* M,
-    int B,
-    int n,
-    int C
-) {
+void stream_mix_cpu_reference(float* out, const float* inp, const float* M, int B, int n, int C) {
     for (int b = 0; b < B; b++) {
         for (int i = 0; i < n; i++) {
             for (int c = 0; c < C; c++) {
@@ -75,9 +68,11 @@ int main() {
 
     printf("Sample outputs (first 10):\n");
     printf("  GPU: ");
-    for (int i = 0; i < 10; i++) printf("%.4f ", h_out_gpu[i]);
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_out_gpu[i]);
     printf("\n  CPU: ");
-    for (int i = 0; i < 10; i++) printf("%.4f ", h_out_cpu[i]);
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_out_cpu[i]);
     printf("\n\n");
 
     check_test(max_diff, 5e-3f, "Stream Mix TC (n=32, TF32)");

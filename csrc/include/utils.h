@@ -24,7 +24,8 @@ struct L2Flusher {
     }
 
     ~L2Flusher() {
-        if (buf) cudaFree(buf);
+        if (buf)
+            cudaFree(buf);
     }
 
     void flush() {
@@ -39,7 +40,8 @@ inline float max_abs_diff(const float* a, const float* b, int n) {
     float max_diff = 0.0f;
     for (int i = 0; i < n; i++) {
         float diff = fabsf(a[i] - b[i]);
-        if (diff > max_diff) max_diff = diff;
+        if (diff > max_diff)
+            max_diff = diff;
     }
     return max_diff;
 }
@@ -79,13 +81,9 @@ struct BenchTimer {
         cudaEventDestroy(stop);
     }
 
-    void record_start() {
-        cudaEventRecord(start);
-    }
+    void record_start() { cudaEventRecord(start); }
 
-    void record_stop() {
-        cudaEventRecord(stop);
-    }
+    void record_stop() { cudaEventRecord(stop); }
 
     float elapsed_ms() {
         cudaEventSynchronize(stop);
@@ -113,20 +111,28 @@ enum ProfilerTag {
 
 inline const char* profiler_tag_name(ProfilerTag tag) {
     switch (tag) {
-        case TagSetup:   return "Setup";
-        case TagLoad:    return "Load";
-        case TagCompute: return "Compute";
-        case TagReduce:  return "Reduce";
-        case TagStore:   return "Store";
-        case TagSync:    return "Sync";
-        case TagOther:   return "Other";
-        default:         return "Unknown";
+    case TagSetup:
+        return "Setup";
+    case TagLoad:
+        return "Load";
+    case TagCompute:
+        return "Compute";
+    case TagReduce:
+        return "Reduce";
+    case TagStore:
+        return "Store";
+    case TagSync:
+        return "Sync";
+    case TagOther:
+        return "Other";
+    default:
+        return "Unknown";
     }
 }
 
 __device__ __forceinline__ int64_t globaltimer() {
     int64_t t;
-    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t) :: "memory");
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)::"memory");
     return t;
 }
 
@@ -150,21 +156,21 @@ struct DeviceProfiler {
     }
 
     __device__ void start(ProfilerTag tag) {
-        if (cnt >= max_entries) return;
+        if (cnt >= max_entries)
+            return;
         data_ptr[1 + cnt * 4 + 0] = sm_id;
         data_ptr[1 + cnt * 4 + 1] = tag;
         data_ptr[1 + cnt * 4 + 2] = globaltimer();
     }
 
     __device__ void stop() {
-        if (cnt >= max_entries) return;
+        if (cnt >= max_entries)
+            return;
         data_ptr[1 + cnt * 4 + 3] = globaltimer() - data_ptr[1 + cnt * 4 + 2];
         cnt++;
     }
 
-    __device__ void flush() {
-        data_ptr[0] = cnt;
-    }
+    __device__ void flush() { data_ptr[0] = cnt; }
 };
 
 struct ProfilerEntry {
@@ -190,15 +196,15 @@ struct HostProfiler {
     }
 
     ~HostProfiler() {
-        if (d_buffer) cudaFree(d_buffer);
-        if (h_buffer) free(h_buffer);
+        if (d_buffer)
+            cudaFree(d_buffer);
+        if (h_buffer)
+            free(h_buffer);
     }
 
     int64_t* device_ptr() { return d_buffer; }
 
-    void download() {
-        cudaMemcpy(h_buffer, d_buffer, buffer_size, cudaMemcpyDeviceToHost);
-    }
+    void download() { cudaMemcpy(h_buffer, d_buffer, buffer_size, cudaMemcpyDeviceToHost); }
 
     void print_summary() {
         download();
@@ -224,13 +230,16 @@ struct HostProfiler {
                     tag_counts[tag]++;
                 }
 
-                if (start < min_start) min_start = start;
-                if (start + duration > max_end) max_end = start + duration;
+                if (start < min_start)
+                    min_start = start;
+                if (start + duration > max_end)
+                    max_end = start + duration;
             }
         }
 
         int64_t wall_time = max_end - min_start;
-        printf("\nProfiler Summary (%d blocks, %d max entries/block)\n", num_blocks, max_entries_per_block);
+        printf("\nProfiler Summary (%d blocks, %d max entries/block)\n", num_blocks,
+               max_entries_per_block);
         printf("==================================================\n");
         printf("Total wall time: %.2f us\n\n", wall_time / 1000.0f);
         printf("%-10s %10s %10s %10s\n", "Phase", "Total(us)", "Count", "Avg(us)");
@@ -240,8 +249,8 @@ struct HostProfiler {
             if (tag_counts[t] > 0) {
                 float total_us = tag_totals[t] / 1000.0f;
                 float avg_us = total_us / tag_counts[t];
-                printf("%-10s %10.2f %10d %10.2f\n",
-                       profiler_tag_name((ProfilerTag)t), total_us, tag_counts[t], avg_us);
+                printf("%-10s %10.2f %10d %10.2f\n", profiler_tag_name((ProfilerTag)t), total_us,
+                       tag_counts[t], avg_us);
             }
         }
     }
@@ -266,10 +275,10 @@ struct HostProfiler {
                 int tag = (int)block_data[1 + e * 4 + 1];
                 int64_t duration = block_data[1 + e * 4 + 3];
 
-                printf("  SM%02d: %-10s %8.2f us\n",
-                       sm_id, profiler_tag_name((ProfilerTag)tag), duration / 1000.0f);
+                printf("  SM%02d: %-10s %8.2f us\n", sm_id, profiler_tag_name((ProfilerTag)tag),
+                       duration / 1000.0f);
             }
         }
     }
 };
-}
+} // namespace mhc

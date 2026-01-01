@@ -11,14 +11,8 @@ namespace cg = cooperative_groups;
 namespace mhc {
 
 template<int TILE_M, int TILE_N, int BLOCK_SIZE>
-__global__ void sinkhorn_knopp_kernel(
-    float* __restrict__ out,
-    const float* __restrict__ inp,
-    int M,
-    int N,
-    int num_iters,
-    float eps
-) {
+__global__ void sinkhorn_knopp_kernel(float* __restrict__ out, const float* __restrict__ inp, int M,
+                                      int N, int num_iters, float eps) {
     extern __shared__ float smem[];
     float* tile = smem;
     float* row_sums = smem + TILE_M * TILE_N;
@@ -47,7 +41,7 @@ __global__ void sinkhorn_knopp_kernel(
     for (int iter = 0; iter < num_iters; iter++) {
         for (int r = threadIdx.x; r < TILE_M; r += BLOCK_SIZE) {
             float sum = 0.0f;
-            #pragma unroll 4
+#pragma unroll 4
             for (int c = 0; c < TILE_N; c++) {
                 sum += tile[r * TILE_N + c];
             }
@@ -66,7 +60,7 @@ __global__ void sinkhorn_knopp_kernel(
 
         for (int c = threadIdx.x; c < TILE_N; c += BLOCK_SIZE) {
             float sum = 0.0f;
-            #pragma unroll 4
+#pragma unroll 4
             for (int r = 0; r < TILE_M; r++) {
                 sum += tile[r * TILE_N + c];
             }
@@ -97,14 +91,8 @@ __global__ void sinkhorn_knopp_kernel(
 }
 
 template<int TILE_M, int TILE_N, int BLOCK_SIZE>
-__global__ void sinkhorn_knopp_pdl_kernel(
-    float* __restrict__ out,
-    const float* __restrict__ inp,
-    int M,
-    int N,
-    int num_iters,
-    float eps
-) {
+__global__ void sinkhorn_knopp_pdl_kernel(float* __restrict__ out, const float* __restrict__ inp,
+                                          int M, int N, int num_iters, float eps) {
     extern __shared__ float smem[];
     float* tile = smem;
     float* row_sums = smem + TILE_M * TILE_N;
@@ -133,7 +121,7 @@ __global__ void sinkhorn_knopp_pdl_kernel(
     for (int iter = 0; iter < num_iters; iter++) {
         for (int r = threadIdx.x; r < TILE_M; r += BLOCK_SIZE) {
             float sum = 0.0f;
-            #pragma unroll 4
+#pragma unroll 4
             for (int c = 0; c < TILE_N; c++) {
                 sum += tile[r * TILE_N + c];
             }
@@ -152,7 +140,7 @@ __global__ void sinkhorn_knopp_pdl_kernel(
 
         for (int c = threadIdx.x; c < TILE_N; c += BLOCK_SIZE) {
             float sum = 0.0f;
-            #pragma unroll 4
+#pragma unroll 4
             for (int r = 0; r < TILE_M; r++) {
                 sum += tile[r * TILE_N + c];
             }
@@ -189,14 +177,9 @@ __global__ void sinkhorn_knopp_pdl_kernel(
 }
 
 template<int MAX_DIM, int BLOCK_SIZE>
-__global__ void sinkhorn_knopp_single_block_kernel(
-    float* __restrict__ out,
-    const float* __restrict__ inp,
-    int M,
-    int N,
-    int num_iters,
-    float eps
-) {
+__global__ void sinkhorn_knopp_single_block_kernel(float* __restrict__ out,
+                                                   const float* __restrict__ inp, int M, int N,
+                                                   int num_iters, float eps) {
     extern __shared__ float smem[];
     float* tile = smem;
     float* row_sums = smem + MAX_DIM * MAX_DIM;
@@ -252,27 +235,21 @@ __global__ void sinkhorn_knopp_single_block_kernel(
     }
 }
 
-inline void sinkhorn_knopp_forward(
-    float* out,
-    const float* inp,
-    int M,
-    int N,
-    int num_iters,
-    float eps,
-    cudaStream_t stream = nullptr
-) {
+inline void sinkhorn_knopp_forward(float* out, const float* inp, int M, int N, int num_iters,
+                                   float eps, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
 
     if (M <= 64 && N <= 64) {
         constexpr int MAX_DIM = 64;
-        size_t smem_size = MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
 
-        sinkhorn_knopp_single_block_kernel<MAX_DIM, BLOCK_SIZE><<<1, BLOCK_SIZE, smem_size, stream>>>(
-            out, inp, M, N, num_iters, eps
-        );
+        sinkhorn_knopp_single_block_kernel<MAX_DIM, BLOCK_SIZE>
+            <<<1, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps);
     } else if (M <= 128 && N <= 128) {
         constexpr int MAX_DIM = 128;
-        size_t smem_size = MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
 
         auto kernel = sinkhorn_knopp_single_block_kernel<MAX_DIM, BLOCK_SIZE>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
@@ -281,23 +258,18 @@ inline void sinkhorn_knopp_forward(
     } else {
         constexpr int TILE_SIZE = 32;
         dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-        size_t smem_size = TILE_SIZE * TILE_SIZE * sizeof(float) + TILE_SIZE * sizeof(float) + TILE_SIZE * sizeof(float);
+        size_t smem_size = TILE_SIZE * TILE_SIZE * sizeof(float) + TILE_SIZE * sizeof(float) +
+                           TILE_SIZE * sizeof(float);
 
-        sinkhorn_knopp_kernel<TILE_SIZE, TILE_SIZE, BLOCK_SIZE><<<grid, BLOCK_SIZE, smem_size, stream>>>(
-            out, inp, M, N, num_iters, eps
-        );
+        sinkhorn_knopp_kernel<TILE_SIZE, TILE_SIZE, BLOCK_SIZE>
+            <<<grid, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps);
     }
 }
 
 template<int MAX_DIM, int BLOCK_SIZE>
-__global__ void sinkhorn_knopp_single_block_pdl_kernel(
-    float* __restrict__ out,
-    const float* __restrict__ inp,
-    int M,
-    int N,
-    int num_iters,
-    float eps
-) {
+__global__ void sinkhorn_knopp_single_block_pdl_kernel(float* __restrict__ out,
+                                                       const float* __restrict__ inp, int M, int N,
+                                                       int num_iters, float eps) {
     extern __shared__ float smem[];
     float* tile = smem;
     float* row_sums = smem + MAX_DIM * MAX_DIM;
@@ -359,20 +331,14 @@ __global__ void sinkhorn_knopp_single_block_pdl_kernel(
     }
 }
 
-inline void sinkhorn_knopp_forward_pdl(
-    float* out,
-    const float* inp,
-    int M,
-    int N,
-    int num_iters,
-    float eps,
-    cudaStream_t stream = nullptr
-) {
+inline void sinkhorn_knopp_forward_pdl(float* out, const float* inp, int M, int N, int num_iters,
+                                       float eps, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
 
     if (M <= 64 && N <= 64) {
         constexpr int MAX_DIM = 64;
-        size_t smem_size = MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
 
 #ifdef MHC_ENABLE_PDL
         cudaLaunchAttribute attrs[1];
@@ -387,19 +353,17 @@ inline void sinkhorn_knopp_forward_pdl(
         config.attrs = attrs;
         config.numAttrs = 1;
 
-        CHECK_CUDA(cudaLaunchKernelEx(
-            &config,
-            sinkhorn_knopp_single_block_pdl_kernel<MAX_DIM, BLOCK_SIZE>,
-            out, inp, M, N, num_iters, eps
-        ));
+        CHECK_CUDA(cudaLaunchKernelEx(&config,
+                                      sinkhorn_knopp_single_block_pdl_kernel<MAX_DIM, BLOCK_SIZE>,
+                                      out, inp, M, N, num_iters, eps));
 #else
-        sinkhorn_knopp_single_block_pdl_kernel<MAX_DIM, BLOCK_SIZE><<<1, BLOCK_SIZE, smem_size, stream>>>(
-            out, inp, M, N, num_iters, eps
-        );
+        sinkhorn_knopp_single_block_pdl_kernel<MAX_DIM, BLOCK_SIZE>
+            <<<1, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps);
 #endif
     } else if (M <= 128 && N <= 128) {
         constexpr int MAX_DIM = 128;
-        size_t smem_size = MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
 
         auto kernel = sinkhorn_knopp_single_block_pdl_kernel<MAX_DIM, BLOCK_SIZE>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
@@ -417,18 +381,15 @@ inline void sinkhorn_knopp_forward_pdl(
         config.attrs = attrs;
         config.numAttrs = 1;
 
-        CHECK_CUDA(cudaLaunchKernelEx(
-            &config,
-            kernel,
-            out, inp, M, N, num_iters, eps
-        ));
+        CHECK_CUDA(cudaLaunchKernelEx(&config, kernel, out, inp, M, N, num_iters, eps));
 #else
         kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps);
 #endif
     } else {
         constexpr int TILE_SIZE = 32;
         dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-        size_t smem_size = TILE_SIZE * TILE_SIZE * sizeof(float) + TILE_SIZE * sizeof(float) + TILE_SIZE * sizeof(float);
+        size_t smem_size = TILE_SIZE * TILE_SIZE * sizeof(float) + TILE_SIZE * sizeof(float) +
+                           TILE_SIZE * sizeof(float);
 
 #ifdef MHC_ENABLE_PDL
         cudaLaunchAttribute attrs[1];
@@ -443,16 +404,13 @@ inline void sinkhorn_knopp_forward_pdl(
         config.attrs = attrs;
         config.numAttrs = 1;
 
-        CHECK_CUDA(cudaLaunchKernelEx(
-            &config,
-            sinkhorn_knopp_pdl_kernel<TILE_SIZE, TILE_SIZE, BLOCK_SIZE>,
-            out, inp, M, N, num_iters, eps
-        ));
+        CHECK_CUDA(cudaLaunchKernelEx(&config,
+                                      sinkhorn_knopp_pdl_kernel<TILE_SIZE, TILE_SIZE, BLOCK_SIZE>,
+                                      out, inp, M, N, num_iters, eps));
 #else
-        sinkhorn_knopp_pdl_kernel<TILE_SIZE, TILE_SIZE, BLOCK_SIZE><<<grid, BLOCK_SIZE, smem_size, stream>>>(
-            out, inp, M, N, num_iters, eps
-        );
+        sinkhorn_knopp_pdl_kernel<TILE_SIZE, TILE_SIZE, BLOCK_SIZE>
+            <<<grid, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps);
 #endif
     }
 }
-}
+} // namespace mhc

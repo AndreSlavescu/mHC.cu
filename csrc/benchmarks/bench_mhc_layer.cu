@@ -20,29 +20,26 @@ int main() {
     };
 
     Config configs[] = {
-        {64, 1280, 4},
-        {128, 1280, 4},
-        {256, 1280, 4},
-        {64, 1920, 4},
-        {128, 1920, 4},
-        {64, 2560, 4},
-        {128, 2560, 4},
+        {64, 1280, 4},  {128, 1280, 4}, {256, 1280, 4}, {64, 1920, 4},
+        {128, 1920, 4}, {64, 2560, 4},  {128, 2560, 4},
     };
     int num_configs = sizeof(configs) / sizeof(configs[0]);
 
     printf("MHC Layer End-to-End Benchmark\n");
     printf("==========================================================\n");
-    printf("Pipeline as seen in the paper: Aggregate(H_pre) -> RMSNorm -> Distribute(H_post) + Mix(M)\n");
+    printf("Pipeline as seen in the paper: Aggregate(H_pre) -> RMSNorm -> Distribute(H_post) + "
+           "Mix(M)\n");
     printf("Input shape: [B, n, C]\n");
     printf("PDL path: %s\n\n",
 #ifdef MHC_ENABLE_PDL
-        "Enabled"
+           "Enabled"
 #else
-        "Disabled"
+           "Disabled"
 #endif
     );
 
-    printf("%6s %6s %4s %12s %14s %12s\n", "Batch", "Hidden", "n", "Time (us)", "Throughput", "Bandwidth (GB/s)");
+    printf("%6s %6s %4s %12s %14s %12s\n", "Batch", "Hidden", "n", "Time (us)", "Throughput",
+           "Bandwidth (GB/s)");
     printf("------------------------------------------------------------------\n");
 
     for (int c = 0; c < num_configs; c++) {
@@ -73,7 +70,8 @@ int main() {
 
         float* d_x_expanded;
         CHECK_CUDA(cudaMalloc(&d_x_expanded, B * n * C * sizeof(float)));
-        CHECK_CUDA(cudaMemcpy(d_x_expanded, h_x_expanded, B * n * C * sizeof(float), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_x_expanded, h_x_expanded, B * n * C * sizeof(float),
+                              cudaMemcpyHostToDevice));
 
         MHCLayerConfig cfg;
         cfg.batch_size = B;
@@ -109,7 +107,8 @@ int main() {
         float throughput = B / (avg_time_ms / 1000.0f);
         float bw = (bytes_io / 1e9f) / (avg_time_ms / 1e3f);
 
-        printf("%6d %6d %4d %12.2f %14.0f %12.0f\n", B, C, n, avg_time_ms * 1000.0f, throughput, bw);
+        printf("%6d %6d %4d %12.2f %14.0f %12.0f\n", B, C, n, avg_time_ms * 1000.0f, throughput,
+               bw);
 
         layer.destroy();
         cudaFree(d_x_expanded);

@@ -11,20 +11,15 @@ namespace cg = cooperative_groups;
 namespace mhc {
 
 template<int BLOCK_SIZE, bool OUTPUT_RMS = false>
-__global__ void rmsnorm_kernel(
-    floatX* __restrict__ out,
-    float* __restrict__ rms_out,
-    const floatX* __restrict__ inp,
-    const floatX* __restrict__ weight,
-    int N,
-    int C,
-    float eps
-) {
+__global__ void rmsnorm_kernel(floatX* __restrict__ out, float* __restrict__ rms_out,
+                               const floatX* __restrict__ inp, const floatX* __restrict__ weight,
+                               int N, int C, float eps) {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
     int idx = blockIdx.x;
-    if (idx >= N) return;
+    if (idx >= N)
+        return;
 
     const floatX* x = inp + idx * C;
     floatX* o = out + idx * C;
@@ -74,20 +69,16 @@ __global__ void rmsnorm_kernel(
 }
 
 template<int BLOCK_SIZE, bool OUTPUT_RMS = false>
-__global__ void rmsnorm_kernel_vectorized(
-    floatX* __restrict__ out,
-    float* __restrict__ rms_out,
-    const floatX* __restrict__ inp,
-    const floatX* __restrict__ weight,
-    int N,
-    int C,
-    float eps
-) {
+__global__ void rmsnorm_kernel_vectorized(floatX* __restrict__ out, float* __restrict__ rms_out,
+                                          const floatX* __restrict__ inp,
+                                          const floatX* __restrict__ weight, int N, int C,
+                                          float eps) {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
     int idx = blockIdx.x;
-    if (idx >= N) return;
+    if (idx >= N)
+        return;
 
     const floatX* x = inp + idx * C;
     floatX* o = out + idx * C;
@@ -107,7 +98,7 @@ __global__ void rmsnorm_kernel_vectorized(
         vec_t v = x_vec[i];
         nv_bfloat162* bf_v = reinterpret_cast<nv_bfloat162*>(&v);
 
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; j++) {
             float2 f = __bfloat1622float2(bf_v[j]);
             thread_sum_sq += f.x * f.x + f.y * f.y;
@@ -161,7 +152,7 @@ __global__ void rmsnorm_kernel_vectorized(
         vec_t ov;
         nv_bfloat162* bf_o = reinterpret_cast<nv_bfloat162*>(&ov);
 
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; j++) {
             float2 xf = __bfloat1622float2(bf_x[j]);
             float2 wf = __bfloat1622float2(bf_w[j]);
@@ -181,15 +172,8 @@ __global__ void rmsnorm_kernel_vectorized(
     }
 }
 
-inline void rmsnorm_forward(
-    floatX* out,
-    const floatX* inp,
-    const floatX* weight,
-    int N,
-    int C,
-    float eps,
-    cudaStream_t stream = nullptr
-) {
+inline void rmsnorm_forward(floatX* out, const floatX* inp, const floatX* weight, int N, int C,
+                            float eps, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 512;
     int num_warps = BLOCK_SIZE / 32;
     size_t shared_mem = num_warps * sizeof(float);
@@ -198,26 +182,17 @@ inline void rmsnorm_forward(
     dim3 block(BLOCK_SIZE);
 
     if (C % 8 == 0 && C >= 64) {
-        rmsnorm_kernel_vectorized<BLOCK_SIZE, false><<<grid, block, shared_mem, stream>>>(
-            out, nullptr, inp, weight, N, C, eps
-        );
+        rmsnorm_kernel_vectorized<BLOCK_SIZE, false>
+            <<<grid, block, shared_mem, stream>>>(out, nullptr, inp, weight, N, C, eps);
     } else {
-        rmsnorm_kernel<BLOCK_SIZE, false><<<grid, block, shared_mem, stream>>>(
-            out, nullptr, inp, weight, N, C, eps
-        );
+        rmsnorm_kernel<BLOCK_SIZE, false>
+            <<<grid, block, shared_mem, stream>>>(out, nullptr, inp, weight, N, C, eps);
     }
 }
 
-inline void rmsnorm_forward_with_rms(
-    floatX* out,
-    float* rms_out,
-    const floatX* inp,
-    const floatX* weight,
-    int N,
-    int C,
-    float eps,
-    cudaStream_t stream = nullptr
-) {
+inline void rmsnorm_forward_with_rms(floatX* out, float* rms_out, const floatX* inp,
+                                     const floatX* weight, int N, int C, float eps,
+                                     cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 512;
     int num_warps = BLOCK_SIZE / 32;
     size_t shared_mem = num_warps * sizeof(float);
@@ -226,13 +201,11 @@ inline void rmsnorm_forward_with_rms(
     dim3 block(BLOCK_SIZE);
 
     if (C % 8 == 0 && C >= 64) {
-        rmsnorm_kernel_vectorized<BLOCK_SIZE, true><<<grid, block, shared_mem, stream>>>(
-            out, rms_out, inp, weight, N, C, eps
-        );
+        rmsnorm_kernel_vectorized<BLOCK_SIZE, true>
+            <<<grid, block, shared_mem, stream>>>(out, rms_out, inp, weight, N, C, eps);
     } else {
-        rmsnorm_kernel<BLOCK_SIZE, true><<<grid, block, shared_mem, stream>>>(
-            out, rms_out, inp, weight, N, C, eps
-        );
+        rmsnorm_kernel<BLOCK_SIZE, true>
+            <<<grid, block, shared_mem, stream>>>(out, rms_out, inp, weight, N, C, eps);
     }
 }
-}
+} // namespace mhc
