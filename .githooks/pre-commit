@@ -5,20 +5,14 @@ STAGED_CXX=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cpp
 
 if [ -n "$STAGED_CXX" ]; then
     for file in $STAGED_CXX; do
-        if ! clang-format --dry-run --Werror "$file" 2>/dev/null; then
-            echo "Format error: $file"
-            echo "Run: clang-format -i $file"
-            exit 1
-        fi
+        clang-format -i "$file"
+        git add "$file"
     done
 fi
 
 STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
 
 if [ -n "$STAGED_PY" ]; then
-    if ! black --check $STAGED_PY 2>/dev/null; then
-        echo "Format error in Python files"
-        echo "Run: black $STAGED_PY"
-        exit 1
-    fi
+    black -q $STAGED_PY
+    git add $STAGED_PY
 fi
