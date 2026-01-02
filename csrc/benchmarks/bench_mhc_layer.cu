@@ -38,9 +38,9 @@ int main() {
 #endif
     );
 
-    printf("%6s %6s %4s %12s %14s %12s\n", "Batch", "Hidden", "n", "Time (us)", "Throughput",
-           "Bandwidth (GB/s)");
-    printf("------------------------------------------------------------------\n");
+    printf("%6s %6s %4s %12s %14s %14s\n", "Batch", "Hidden", "n", "Time (us)", "Samples/sec",
+           "BW (GB/s)");
+    printf("-----------------------------------------------------------------------------\n");
 
     for (int c = 0; c < num_configs; c++) {
         int B = configs[c].B;
@@ -107,7 +107,7 @@ int main() {
         float throughput = B / (avg_time_ms / 1000.0f);
         float bw = (bytes_io / 1e9f) / (avg_time_ms / 1e3f);
 
-        printf("%6d %6d %4d %12.2f %14.0f %12.0f\n", B, C, n, avg_time_ms * 1000.0f, throughput,
+        printf("%6d %6d %4d %12.2f %14.0f %14.0f\n", B, C, n, avg_time_ms * 1000.0f, throughput,
                bw);
 
         layer.destroy();

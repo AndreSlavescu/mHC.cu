@@ -1,11 +1,12 @@
 #include <cstdio>
 #include <cstdlib>
-#include <cuda_runtime.h>
-#include <cuda_bf16.h>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
-#include "mhc_types.h"
-#include "utils.h"
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+
+#include "../include/mhc_types.h"
+#include "../include/utils.h"
 
 namespace cg = cooperative_groups;
 using namespace mhc;

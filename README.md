@@ -28,6 +28,33 @@ cmake -B build -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100"
 ./build/bench_rmsnorm
 ./build/bench_sinkhorn_knopp
 ./build/bench_mhc_layer
+./build/bench_fused_rmsnorm_matmul
+./build/bench_stream_ops_backward
+./build/bench_rmsnorm_backward
+```
+
+## Contributing
+
+### Pre-commit Hook
+
+This project uses a pre-commit hook to automatically format code using the rules in `.clang-format` and run tests before each commit.
+
+**Setup:**
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+```
+
+**Process:**
+1. Runs `clang-format` on all staged `.cu` and `.cuh` files
+2. Builds the project
+3. Runs all tests
+
+If any step fails, the commit will be aborted.
+
+**Format Manually:**
+```bash
+find csrc -name "*.cu" -o -name "*.cuh" | xargs clang-format -i
 ```
 
 ## Paper

@@ -208,4 +208,79 @@ inline void rmsnorm_forward_with_rms(floatX* out, float* rms_out, const floatX* 
             <<<grid, block, shared_mem, stream>>>(out, rms_out, inp, weight, N, C, eps);
     }
 }
+template<int BLOCK_SIZE>
+__global__ void rmsnorm_backward_kernel(float* __restrict__ d_inp, float* __restrict__ d_weight,
+                                        const float* __restrict__ grad,
+                                        const floatX* __restrict__ inp,
+                                        const floatX* __restrict__ weight,
+                                        const float* __restrict__ rms, int N, int C) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+
+    int idx = blockIdx.x;
+    if (idx >= N)
+        return;
+
+    const floatX* x = inp + idx * C;
+    const float* g = grad + idx * C;
+    float* dx = d_inp + idx * C;
+    float r = rms[idx];
+    float r_inv = 1.0f / r;
+
+    extern __shared__ float shared[];
+    float* s_reduce = shared;
+
+    float thread_dot = 0.0f;
+    for (int i = threadIdx.x; i < C; i += BLOCK_SIZE) {
+        float g_val = g[i];
+        float w_val = (float)weight[i];
+        float x_val = (float)x[i];
+        thread_dot += g_val * w_val * x_val;
+    }
+
+    float warp_dot = cg::reduce(warp, thread_dot, cg::plus<float>());
+
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    int num_warps = BLOCK_SIZE / 32;
+
+    if (lane_id == 0) {
+        s_reduce[warp_id] = warp_dot;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float val = (lane_id < num_warps) ? s_reduce[lane_id] : 0.0f;
+        float block_dot = cg::reduce(warp, val, cg::plus<float>());
+        if (lane_id == 0) {
+            s_reduce[0] = block_dot;
+        }
+    }
+    __syncthreads();
+
+    float dot_sum = s_reduce[0];
+    float correction = dot_sum / ((float)C * r * r);
+
+    for (int i = threadIdx.x; i < C; i += BLOCK_SIZE) {
+        float g_val = g[i];
+        float w_val = (float)weight[i];
+        float x_val = (float)x[i];
+
+        dx[i] = (g_val * w_val * r_inv) - (x_val * correction * r_inv);
+
+        atomicAdd(&d_weight[i], g_val * x_val * r_inv);
+    }
+}
+
+inline void rmsnorm_backward(float* d_inp, float* d_weight, const float* grad, const floatX* inp,
+                             const floatX* weight, const float* rms, int N, int C,
+                             cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 512;
+    int num_warps = BLOCK_SIZE / 32;
+    size_t shared_mem = num_warps * sizeof(float);
+
+    rmsnorm_backward_kernel<BLOCK_SIZE>
+        <<<N, BLOCK_SIZE, shared_mem, stream>>>(d_inp, d_weight, grad, inp, weight, rms, N, C);
+}
+
 } // namespace mhc

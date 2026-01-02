@@ -1,8 +1,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
-#include "mhc_types.h"
-#include "utils.h"
+
+#include "../include/mhc_types.h"
+#include "../include/utils.h"
+#include "../kernels/sinkhorn_knopp.cuh"
 
 using namespace mhc;
 
@@ -118,10 +120,12 @@ int main() {
     };
     int num_configs = sizeof(configs) / sizeof(configs[0]);
 
-    printf("Sinkhorn-Knopp Benchmark\n");
-    printf("=====================================\n");
-    printf("%6s %6s %6s %12s %14s\n", "M", "N", "Iterations", "Time (us)", "Time/iteration (us)");
-    printf("---------------------------------------------------\n");
+    printf("Sinkhorn-Knopp Forward Benchmark\n");
+    printf("Note: Small matrices are latency-bound (single block). GFLOPS will be low.\n");
+    printf("=======================================================================\n");
+    printf("%6s %6s %6s %12s %10s %10s %12s\n", "M", "N", "Iters", "Time (us)", "us/iter", "GFLOPS",
+           "Bandwidth (GB/s)");
+    printf("-----------------------------------------------------------------------\n");
 
     for (int c = 0; c < num_configs; c++) {
         int M = configs[c].M;
@@ -164,7 +168,15 @@ int main() {
         float time_us = avg_time_ms * 1000.0f;
         float time_per_iter_us = time_us / num_iters;
 
-        printf("%6d %6d %6d %12.2f %14.2f\n", M, N, num_iters, time_us, time_per_iter_us);
+        double flops_per_iter = 4.0 * M * N;
+        double total_flops = flops_per_iter * num_iters;
+        float gflops = (total_flops / 1e9f) / (avg_time_ms / 1e3f);
+
+        size_t bytes_io = 2 * M * N * sizeof(float);
+        float bw = (bytes_io / 1e9f) / (avg_time_ms / 1e3f);
+
+        printf("%6d %6d %6d %12.2f %10.2f %10.2f %12.2f\n", M, N, num_iters, time_us,
+               time_per_iter_us, gflops, bw);
 
         cudaFree(d_inp);
         cudaFree(d_out);
@@ -207,6 +219,78 @@ int main() {
         cudaFree(d_inp);
         cudaFree(d_out);
         free(h_inp);
+    }
+
+    printf("\nSinkhorn-Knopp Backward Benchmark\n");
+    printf("Note: Backward recomputes forward O(iters^2) times via implicit differentiation.\n");
+    printf("=======================================================================\n");
+    printf("%6s %6s %6s %12s %10s %10s %12s\n", "M", "N", "Iters", "Time (us)", "us/iter", "GFLOPS",
+           "Bandwidth (GB/s)");
+    printf("-----------------------------------------------------------------------\n");
+
+    for (int c = 0; c < num_configs; c++) {
+        int M = configs[c].M;
+        int N = configs[c].N;
+        int num_iters = configs[c].iters;
+
+        if (M > 64 || N > 64)
+            continue;
+
+        float* h_inp = (float*)malloc(M * N * sizeof(float));
+        float* h_grad = (float*)malloc(M * N * sizeof(float));
+
+        srand(42);
+        for (int i = 0; i < M * N; i++) {
+            h_inp[i] = (float)rand() / RAND_MAX + 0.1f;
+            h_grad[i] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
+        }
+
+        float *d_inp, *d_out, *d_grad, *d_dinp;
+        CHECK_CUDA(cudaMalloc(&d_inp, M * N * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_out, M * N * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_grad, M * N * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_dinp, M * N * sizeof(float)));
+
+        CHECK_CUDA(cudaMemcpy(d_inp, h_inp, M * N * sizeof(float), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_grad, h_grad, M * N * sizeof(float), cudaMemcpyHostToDevice));
+
+        sinkhorn_knopp_forward(d_out, d_inp, M, N, num_iters, eps);
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        BenchTimer timer;
+        float total_time = 0.0f;
+
+        for (int i = 0; i < bench_runs; i++) {
+            flusher.flush();
+
+            timer.record_start();
+            sinkhorn_knopp_backward(d_dinp, d_grad, d_out, d_inp, N, num_iters, eps);
+            timer.record_stop();
+            total_time += timer.elapsed_ms();
+        }
+
+        float avg_time_ms = total_time / bench_runs;
+        float time_us = avg_time_ms * 1000.0f;
+        float time_per_iter_us = time_us / num_iters;
+
+        int fwd_recompute_iters = num_iters * (num_iters - 1) / 2;
+        double fwd_flops = 4.0 * M * N * fwd_recompute_iters;
+        double bwd_flops = 6.0 * M * N * num_iters;
+        double total_flops = fwd_flops + bwd_flops;
+        float gflops = (total_flops / 1e9f) / (avg_time_ms / 1e3f);
+
+        size_t bytes_io = 4 * M * N * sizeof(float);
+        float bw = (bytes_io / 1e9f) / (avg_time_ms / 1e3f);
+
+        printf("%6d %6d %6d %12.2f %10.2f %10.2f %12.2f\n", M, N, num_iters, time_us,
+               time_per_iter_us, gflops, bw);
+
+        cudaFree(d_inp);
+        cudaFree(d_out);
+        cudaFree(d_grad);
+        cudaFree(d_dinp);
+        free(h_inp);
+        free(h_grad);
     }
 
     return 0;

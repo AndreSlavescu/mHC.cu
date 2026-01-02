@@ -63,8 +63,10 @@ struct MHCLayerWeights {
 struct MHCLayerBuffers {
     float* x_expanded;
     floatX* x_aggregated_bf16;
+    float* x_aggregated_f32;
     float* rms_values;
     floatX* layer_out_bf16;
+    float* layer_out_f32;
     float* y_distributed;
     float* sinkhorn_M;
     float* x_mixed;
@@ -84,8 +86,10 @@ struct MHCLayerBuffers {
 
         CHECK_CUDA(cudaMalloc(&x_expanded, B * n * C * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&x_aggregated_bf16, B * C * sizeof(floatX)));
+        CHECK_CUDA(cudaMalloc(&x_aggregated_f32, B * C * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&rms_values, B * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&layer_out_bf16, B * C * sizeof(floatX)));
+        CHECK_CUDA(cudaMalloc(&layer_out_f32, B * C * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&y_distributed, B * n * C * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&sinkhorn_M, n * n * sizeof(float)));
         if (needs_x_mixed) {
@@ -102,8 +106,10 @@ struct MHCLayerBuffers {
 
         cudaFree(x_expanded);
         cudaFree(x_aggregated_bf16);
+        cudaFree(x_aggregated_f32);
         cudaFree(rms_values);
         cudaFree(layer_out_bf16);
+        cudaFree(layer_out_f32);
         cudaFree(y_distributed);
         cudaFree(sinkhorn_M);
         if (x_mixed)
@@ -111,6 +117,63 @@ struct MHCLayerBuffers {
         cudaFree(output);
 
         initialized = false;
+    }
+};
+
+struct MHCLayerGradients {
+    float* d_x_expanded;
+    float* d_H_pre;
+    float* d_rmsnorm_weight;
+    float* d_H_post;
+    float* d_H_res;
+    float* d_x_aggregated;
+    float* d_layer_out;
+    float* d_y_distributed;
+    float* d_x_mixed;
+    float* d_M;
+
+    bool initialized;
+
+    MHCLayerGradients() : initialized(false) {}
+
+    void init(int B, int C, int n) {
+        CHECK_CUDA(cudaMalloc(&d_x_expanded, B * n * C * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H_pre, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_rmsnorm_weight, C * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H_post, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H_res, n * n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_x_aggregated, B * C * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_layer_out, B * C * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_y_distributed, B * n * C * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_x_mixed, B * n * C * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_M, n * n * sizeof(float)));
+
+        initialized = true;
+    }
+
+    void destroy() {
+        if (!initialized)
+            return;
+
+        cudaFree(d_x_expanded);
+        cudaFree(d_H_pre);
+        cudaFree(d_rmsnorm_weight);
+        cudaFree(d_H_post);
+        cudaFree(d_H_res);
+        cudaFree(d_x_aggregated);
+        cudaFree(d_layer_out);
+        cudaFree(d_y_distributed);
+        cudaFree(d_x_mixed);
+        cudaFree(d_M);
+
+        initialized = false;
+    }
+
+    void zero_weight_grads(int C, int n, cudaStream_t stream = nullptr) {
+        CHECK_CUDA(cudaMemsetAsync(d_H_pre, 0, n * sizeof(float), stream));
+        CHECK_CUDA(cudaMemsetAsync(d_rmsnorm_weight, 0, C * sizeof(float), stream));
+        CHECK_CUDA(cudaMemsetAsync(d_H_post, 0, n * sizeof(float), stream));
+        CHECK_CUDA(cudaMemsetAsync(d_H_res, 0, n * n * sizeof(float), stream));
     }
 };
 
@@ -148,29 +211,38 @@ struct MHCLayer {
     MHCLayerConfig config;
     MHCLayerWeights weights;
     MHCLayerBuffers buffers;
+    MHCLayerGradients grads;
 
     StreamMixTC stream_mix_tc;
     bool use_tc_mix;
+    bool backward_enabled;
 
     cudaStream_t stream;
     bool owns_stream;
     bool initialized;
 
-    MHCLayer() : stream(nullptr), owns_stream(false), initialized(false), use_tc_mix(false) {}
+    MHCLayer()
+        : stream(nullptr), owns_stream(false), initialized(false), use_tc_mix(false),
+          backward_enabled(false) {}
 
-    void init(const MHCLayerConfig& cfg, cudaStream_t s = nullptr) {
+    void init(const MHCLayerConfig& cfg, cudaStream_t s = nullptr, bool enable_backward = false) {
         config = cfg;
         int B = cfg.batch_size;
         int C = cfg.hidden_dim;
         int n = cfg.expansion_rate;
 
         use_tc_mix = (n >= STREAM_MIX_TC_THRESHOLD);
+        backward_enabled = enable_backward;
 
         weights.init(C, n);
-        buffers.init(B, C, n, use_tc_mix);
+        buffers.init(B, C, n, use_tc_mix || backward_enabled);
 
         if (use_tc_mix) {
             stream_mix_tc.init(B, n, C);
+        }
+
+        if (backward_enabled) {
+            grads.init(B, C, n);
         }
 
         if (s == nullptr) {
@@ -190,6 +262,9 @@ struct MHCLayer {
 
         weights.destroy();
         buffers.destroy();
+        if (backward_enabled) {
+            grads.destroy();
+        }
 
         if (use_tc_mix) {
             stream_mix_tc.destroy();
@@ -297,6 +372,46 @@ struct MHCLayer {
     float* get_output() { return buffers.output; }
 
     float* get_rms_values() { return buffers.rms_values; }
+
+    MHCLayerGradients& get_gradients() { return grads; }
+
+    void backward(const float* d_output) {
+        if (!backward_enabled) {
+            fprintf(stderr, "MHCLayer::backward called but backward not enabled\n");
+            return;
+        }
+
+        int B = config.batch_size;
+        int C = config.hidden_dim;
+        int n = config.expansion_rate;
+
+        grads.zero_weight_grads(C, n, stream);
+
+        stream_mix_backward(grads.d_x_mixed, grads.d_M, d_output, buffers.x_expanded,
+                            buffers.sinkhorn_M, B, n, C, stream);
+
+        CHECK_CUDA(cudaMemcpyAsync(grads.d_y_distributed, d_output, B * n * C * sizeof(float),
+                                   cudaMemcpyDeviceToDevice, stream));
+
+        sinkhorn_knopp_backward(grads.d_H_res, grads.d_M, buffers.sinkhorn_M, weights.H_res, n,
+                                config.sinkhorn_iters, config.eps, stream);
+
+        bf16_to_float(buffers.layer_out_f32, buffers.layer_out_bf16, B * C, stream);
+
+        stream_distribute_backward(grads.d_layer_out, grads.d_H_post, grads.d_y_distributed,
+                                   buffers.layer_out_f32, weights.H_post, B, n, C, stream);
+
+        bf16_to_float(buffers.x_aggregated_f32, buffers.x_aggregated_bf16, B * C, stream);
+
+        rmsnorm_backward(grads.d_x_aggregated, grads.d_rmsnorm_weight, grads.d_layer_out,
+                         buffers.x_aggregated_bf16, weights.rmsnorm_weight, buffers.rms_values, B,
+                         C, stream);
+
+        stream_aggregate_backward(grads.d_x_expanded, grads.d_H_pre, grads.d_x_aggregated,
+                                  buffers.x_expanded, weights.H_pre, B, n, C, stream);
+    }
+
+    float* get_dx() { return grads.d_x_expanded; }
 
     void sync() { CHECK_CUDA(cudaStreamSynchronize(stream)); }
 };

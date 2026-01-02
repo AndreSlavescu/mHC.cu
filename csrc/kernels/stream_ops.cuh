@@ -570,4 +570,260 @@ inline void stream_mix_add(float* out, const float* x_inp, const float* y_dist, 
     }
 }
 
+template<int BLOCK_SIZE, int MAX_N>
+__global__ void
+stream_aggregate_backward_dx_kernel(float* __restrict__ d_inp, const float* __restrict__ grad,
+                                    const float* __restrict__ H_pre, int B, int n, int C) {
+    __shared__ float s_H_pre[MAX_N];
+
+    if (threadIdx.x < n) {
+        s_H_pre[threadIdx.x] = H_pre[threadIdx.x];
+    }
+    __syncthreads();
+
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * n * C;
+
+    if (idx >= total)
+        return;
+
+    int b = idx / (n * C);
+    int remainder = idx % (n * C);
+    int i = remainder / C;
+    int c = remainder % C;
+
+    int grad_idx = b * C + c;
+    d_inp[idx] = grad[grad_idx] * s_H_pre[i];
+}
+
+template<int BLOCK_SIZE, int MAX_N>
+__global__ void
+stream_aggregate_backward_dH_kernel(float* __restrict__ d_H_pre, const float* __restrict__ grad,
+                                    const float* __restrict__ inp, int B, int n, int C) {
+    int i = blockIdx.x;
+    if (i >= n)
+        return;
+
+    float sum = 0.0f;
+    for (int idx = threadIdx.x; idx < B * C; idx += BLOCK_SIZE) {
+        int b = idx / C;
+        int c = idx % C;
+        int src_idx = b * n * C + i * C + c;
+        sum += grad[idx] * inp[src_idx];
+    }
+
+    __shared__ float s_partial[BLOCK_SIZE / 32];
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+
+    for (int offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    if (lane_id == 0) {
+        s_partial[warp_id] = sum;
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float total_sum = 0.0f;
+        for (int w = 0; w < BLOCK_SIZE / 32; w++) {
+            total_sum += s_partial[w];
+        }
+        d_H_pre[i] = total_sum;
+    }
+}
+
+inline void stream_aggregate_backward(float* d_inp, float* d_H_pre, const float* grad,
+                                      const float* inp, const float* H_pre, int B, int n, int C,
+                                      cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    int total = B * n * C;
+    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    constexpr int MAX_N = 8;
+    stream_aggregate_backward_dx_kernel<BLOCK_SIZE, MAX_N>
+        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_pre, B, n, C);
+
+    stream_aggregate_backward_dH_kernel<BLOCK_SIZE, MAX_N>
+        <<<n, BLOCK_SIZE, 0, stream>>>(d_H_pre, grad, inp, B, n, C);
+}
+
+template<int BLOCK_SIZE, int MAX_N>
+__global__ void
+stream_distribute_backward_dx_kernel(float* __restrict__ d_inp, const float* __restrict__ grad,
+                                     const float* __restrict__ H_post, int B, int n, int C) {
+    __shared__ float s_H_post[MAX_N];
+
+    if (threadIdx.x < n) {
+        s_H_post[threadIdx.x] = H_post[threadIdx.x];
+    }
+    __syncthreads();
+
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * C;
+
+    if (idx >= total)
+        return;
+
+    int b = idx / C;
+    int c = idx % C;
+
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        if (i < n) {
+            int grad_idx = b * n * C + i * C + c;
+            sum += grad[grad_idx] * s_H_post[i];
+        }
+    }
+
+    d_inp[idx] = sum;
+}
+
+template<int BLOCK_SIZE, int MAX_N>
+__global__ void
+stream_distribute_backward_dH_kernel(float* __restrict__ d_H_post, const float* __restrict__ grad,
+                                     const float* __restrict__ inp, int B, int n, int C) {
+    int i = blockIdx.x;
+    if (i >= n)
+        return;
+
+    float sum = 0.0f;
+    for (int idx = threadIdx.x; idx < B * C; idx += BLOCK_SIZE) {
+        int b = idx / C;
+        int c = idx % C;
+        int grad_idx = b * n * C + i * C + c;
+        float inp_val = inp[b * C + c];
+        sum += grad[grad_idx] * inp_val;
+    }
+
+    __shared__ float s_partial[BLOCK_SIZE / 32];
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+
+    for (int offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    if (lane_id == 0) {
+        s_partial[warp_id] = sum;
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float total_sum = 0.0f;
+        for (int w = 0; w < BLOCK_SIZE / 32; w++) {
+            total_sum += s_partial[w];
+        }
+        d_H_post[i] = total_sum;
+    }
+}
+
+inline void stream_distribute_backward(float* d_inp, float* d_H_post, const float* grad,
+                                       const float* inp, const float* H_post, int B, int n, int C,
+                                       cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    int total = B * C;
+    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    constexpr int MAX_N = 8;
+    stream_distribute_backward_dx_kernel<BLOCK_SIZE, MAX_N>
+        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_post, B, n, C);
+
+    stream_distribute_backward_dH_kernel<BLOCK_SIZE, MAX_N>
+        <<<n, BLOCK_SIZE, 0, stream>>>(d_H_post, grad, inp, B, n, C);
+}
+
+template<int BLOCK_SIZE, int MAX_N>
+__global__ void stream_mix_backward_dx_kernel(float* __restrict__ d_inp,
+                                              const float* __restrict__ grad,
+                                              const float* __restrict__ M, int B, int n, int C) {
+    __shared__ float s_M[MAX_N * MAX_N];
+
+    if (threadIdx.x < n * n) {
+        s_M[threadIdx.x] = M[threadIdx.x];
+    }
+    __syncthreads();
+
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * n * C;
+
+    if (idx >= total)
+        return;
+
+    int b = idx / (n * C);
+    int remainder = idx % (n * C);
+    int j = remainder / C;
+    int c = remainder % C;
+
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        if (i < n) {
+            int grad_idx = b * n * C + i * C + c;
+            sum += s_M[i * n + j] * grad[grad_idx];
+        }
+    }
+
+    d_inp[idx] = sum;
+}
+
+template<int BLOCK_SIZE>
+__global__ void stream_mix_backward_dM_kernel(float* __restrict__ d_M,
+                                              const float* __restrict__ grad,
+                                              const float* __restrict__ inp, int B, int n, int C) {
+    int ij = blockIdx.x;
+    if (ij >= n * n)
+        return;
+
+    int i = ij / n;
+    int j = ij % n;
+
+    float sum = 0.0f;
+    for (int idx = threadIdx.x; idx < B * C; idx += BLOCK_SIZE) {
+        int b = idx / C;
+        int c = idx % C;
+        int grad_idx = b * n * C + i * C + c;
+        int inp_idx = b * n * C + j * C + c;
+        sum += grad[grad_idx] * inp[inp_idx];
+    }
+
+    __shared__ float s_partial[BLOCK_SIZE / 32];
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+
+    for (int offset = 16; offset > 0; offset /= 2) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    if (lane_id == 0) {
+        s_partial[warp_id] = sum;
+    }
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        float total_sum = 0.0f;
+        for (int w = 0; w < BLOCK_SIZE / 32; w++) {
+            total_sum += s_partial[w];
+        }
+        d_M[ij] = total_sum;
+    }
+}
+
+inline void stream_mix_backward(float* d_inp, float* d_M, const float* grad, const float* inp,
+                                const float* M, int B, int n, int C,
+                                cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    int total = B * n * C;
+    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    constexpr int MAX_N = 8;
+    stream_mix_backward_dx_kernel<BLOCK_SIZE, MAX_N>
+        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, grad, M, B, n, C);
+
+    stream_mix_backward_dM_kernel<BLOCK_SIZE>
+        <<<n * n, BLOCK_SIZE, 0, stream>>>(d_M, grad, inp, B, n, C);
+}
+
 } // namespace mhc

@@ -413,4 +413,145 @@ inline void sinkhorn_knopp_forward_pdl(float* out, const float* inp, int M, int 
 #endif
     }
 }
+template<int MAX_DIM, int BLOCK_SIZE>
+__global__ void
+sinkhorn_knopp_backward_kernel(float* __restrict__ d_inp, const float* __restrict__ grad,
+                               const float* __restrict__ M_out, const float* __restrict__ M_inp,
+                               int N, int num_iters, float eps) {
+    extern __shared__ float smem[];
+    float* d_tile = smem;
+    float* row_buffer = smem + MAX_DIM * MAX_DIM;
+    float* col_buffer = row_buffer + MAX_DIM;
+    float* tile_fwd = col_buffer + MAX_DIM;
+    float* row_sums = tile_fwd + MAX_DIM * MAX_DIM;
+    float* col_sums = row_sums + MAX_DIM;
+
+    int total = N * N;
+
+    for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+        d_tile[i] = grad[i];
+    }
+    __syncthreads();
+
+    for (int iter = num_iters - 1; iter >= 0; iter--) {
+        for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+            tile_fwd[i] = M_inp[i];
+        }
+        __syncthreads();
+
+        for (int fwd_iter = 0; fwd_iter < iter; fwd_iter++) {
+            for (int r = threadIdx.x; r < N; r += BLOCK_SIZE) {
+                float sum = 0.0f;
+                for (int c = 0; c < N; c++) {
+                    sum += tile_fwd[r * N + c];
+                }
+                row_sums[r] = sum;
+            }
+            __syncthreads();
+
+            for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+                int r = i / N;
+                if (row_sums[r] > eps) {
+                    tile_fwd[i] /= row_sums[r];
+                }
+            }
+            __syncthreads();
+
+            for (int c = threadIdx.x; c < N; c += BLOCK_SIZE) {
+                float sum = 0.0f;
+                for (int r = 0; r < N; r++) {
+                    sum += tile_fwd[r * N + c];
+                }
+                col_sums[c] = sum;
+            }
+            __syncthreads();
+
+            for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+                int c = i % N;
+                if (col_sums[c] > eps) {
+                    tile_fwd[i] /= col_sums[c];
+                }
+            }
+            __syncthreads();
+        }
+
+        for (int r = threadIdx.x; r < N; r += BLOCK_SIZE) {
+            float sum = 0.0f;
+            for (int c = 0; c < N; c++) {
+                sum += tile_fwd[r * N + c];
+            }
+            row_sums[r] = sum;
+        }
+        __syncthreads();
+
+        for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+            int r = i / N;
+            if (row_sums[r] > eps) {
+                tile_fwd[i] /= row_sums[r];
+            }
+        }
+        __syncthreads();
+
+        for (int c = threadIdx.x; c < N; c += BLOCK_SIZE) {
+            col_sums[c] = 1.0f;
+        }
+        __syncthreads();
+
+        for (int c = threadIdx.x; c < N; c += BLOCK_SIZE) {
+            float dot = 0.0f;
+            for (int r = 0; r < N; r++) {
+                dot += d_tile[r * N + c] * tile_fwd[r * N + c];
+            }
+            col_buffer[c] = dot;
+        }
+        __syncthreads();
+
+        for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+            int c = i % N;
+            d_tile[i] = (d_tile[i] - tile_fwd[i] * col_buffer[c]) / col_sums[c];
+        }
+        __syncthreads();
+
+        for (int r = threadIdx.x; r < N; r += BLOCK_SIZE) {
+            row_sums[r] = 1.0f;
+        }
+        __syncthreads();
+
+        for (int r = threadIdx.x; r < N; r += BLOCK_SIZE) {
+            float dot = 0.0f;
+            for (int c = 0; c < N; c++) {
+                dot += d_tile[r * N + c] * tile_fwd[r * N + c];
+            }
+            row_buffer[r] = dot;
+        }
+        __syncthreads();
+
+        for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+            int r = i / N;
+            d_tile[i] = (d_tile[i] - tile_fwd[i] * row_buffer[r]) / row_sums[r];
+        }
+        __syncthreads();
+    }
+
+    for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
+        d_inp[i] = d_tile[i];
+    }
+}
+
+inline void sinkhorn_knopp_backward(float* d_inp, const float* grad, const float* M_out,
+                                    const float* M_inp, int N, int num_iters, float eps,
+                                    cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    if (N <= 64) {
+        constexpr int MAX_DIM = 64;
+        size_t smem_size = 2 * MAX_DIM * MAX_DIM * sizeof(float) + 4 * MAX_DIM * sizeof(float);
+
+        sinkhorn_knopp_backward_kernel<MAX_DIM, BLOCK_SIZE>
+            <<<1, BLOCK_SIZE, smem_size, stream>>>(d_inp, grad, M_out, M_inp, N, num_iters, eps);
+    } else {
+        fprintf(stderr, "sinkhorn_knopp_backward: N > 64 not supported\n");
+    }
+}
+
 } // namespace mhc

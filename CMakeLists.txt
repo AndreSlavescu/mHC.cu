@@ -96,3 +96,102 @@ target_compile_options(test_stream_mix_tc PRIVATE
 if(MHC_ENABLE_PDL)
     target_compile_definitions(test_stream_mix_tc PRIVATE MHC_ENABLE_PDL)
 endif()
+
+add_executable(test_fused_rmsnorm_matmul
+    csrc/tests/test_fused_rmsnorm_matmul.cu
+)
+target_link_libraries(test_fused_rmsnorm_matmul PRIVATE mhc_kernels)
+target_compile_options(test_fused_rmsnorm_matmul PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(test_fused_rmsnorm_matmul PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(test_fused_rmsnorm_matmul_backward
+    csrc/tests/test_fused_rmsnorm_matmul_backward.cu
+)
+target_link_libraries(test_fused_rmsnorm_matmul_backward PRIVATE mhc_kernels)
+target_compile_options(test_fused_rmsnorm_matmul_backward PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(test_fused_rmsnorm_matmul_backward PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(test_stream_aggregate_backward
+    csrc/tests/test_stream_aggregate_backward.cu
+)
+target_link_libraries(test_stream_aggregate_backward PRIVATE mhc_kernels)
+target_compile_options(test_stream_aggregate_backward PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(test_stream_aggregate_backward PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(test_stream_distribute_backward
+    csrc/tests/test_stream_distribute_backward.cu
+)
+target_link_libraries(test_stream_distribute_backward PRIVATE mhc_kernels)
+target_compile_options(test_stream_distribute_backward PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(test_stream_distribute_backward PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(test_stream_mix_backward
+    csrc/tests/test_stream_mix_backward.cu
+)
+target_link_libraries(test_stream_mix_backward PRIVATE mhc_kernels)
+target_compile_options(test_stream_mix_backward PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(test_stream_mix_backward PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(test_rmsnorm_backward
+    csrc/tests/test_rmsnorm_backward.cu
+)
+target_link_libraries(test_rmsnorm_backward PRIVATE mhc_kernels)
+target_compile_options(test_rmsnorm_backward PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(test_rmsnorm_backward PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(bench_stream_ops
+    csrc/benchmarks/bench_stream_ops.cu
+)
+target_link_libraries(bench_stream_ops PRIVATE mhc_kernels)
+target_compile_options(bench_stream_ops PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(bench_stream_ops PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(bench_stream_ops_backward
+    csrc/benchmarks/bench_stream_ops_backward.cu
+)
+target_link_libraries(bench_stream_ops_backward PRIVATE mhc_kernels)
+target_compile_options(bench_stream_ops_backward PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(bench_stream_ops_backward PRIVATE MHC_ENABLE_PDL)
+endif()
+
+add_executable(bench_fused_rmsnorm_matmul
+    csrc/benchmarks/bench_fused_rmsnorm_matmul.cu
+)
+target_link_libraries(bench_fused_rmsnorm_matmul PRIVATE mhc_kernels)
+target_compile_options(bench_fused_rmsnorm_matmul PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+)
+if(MHC_ENABLE_PDL)
+    target_compile_definitions(bench_fused_rmsnorm_matmul PRIVATE MHC_ENABLE_PDL)
+endif()
