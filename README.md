@@ -1,63 +1,56 @@
 # mHC.cu
-unofficial CUDA implementation of mHC: Manifold-Constrained Hyper-Connections by DeepseekAI
+
+unofficial CUDA implementation of mHC: Manifold-Constrained Hyper-Connections by DeepSeek-AI
+
+## Installation
+
+```bash
+make install      # install PyTorch extension
+make install-dev  # install with dev dependencies
+```
 
 ## Build
 
 ```bash
-cmake -B build -DCMAKE_CUDA_ARCHITECTURES=90 -DMHC_ENABLE_PDL=ON # test platform is H100 SXM5
-cmake --build build -j4
+make              # build C++ / CUDA source for all architectures
+make CUDA_ARCH=90 # build for specific arch (H100)
+make clean        # clean build
 ```
 
-For multi-architecture builds:
+## Test
+
 ```bash
-cmake -B build -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;100"
+make test         # C++ tests
+make test-python  # Python tests
 ```
 
-## Tests
+## Benchmark
 
-### Forward Pass
 ```bash
-./build/test_rmsnorm
-./build/test_sinkhorn_knopp
-./build/test_stream_mix_tc
-./build/test_fused_rmsnorm_matmul
-./build/test_mhc_layer
+make bench        # run all benchmarks
 ```
 
-### Backward Pass
+## Format
+
 ```bash
-./build/test_rmsnorm_backward
-./build/test_fused_rmsnorm_matmul_backward
-./build/test_stream_aggregate_backward
-./build/test_stream_distribute_backward
-./build/test_stream_mix_backward
+make format       # clang-format + python black formatting
 ```
 
-## Benchmarks
+## Usage
 
-### Forward Pass
-```bash
-./build/bench_rmsnorm
-./build/bench_sinkhorn_knopp
-./build/bench_fused_rmsnorm_matmul
-./build/bench_stream_ops
-./build/bench_mhc_layer
-```
+```python
+import torch
+from mhc import MHCLayer
 
-### Backward Pass
-```bash
-./build/bench_rmsnorm_backward
-./build/bench_sinkhorn_knopp_backward
-./build/bench_fused_rmsnorm_matmul_backward
-./build/bench_stream_ops_backward
+layer = MHCLayer(hidden_dim=4096, expansion_rate=4).cuda()
+x = torch.randn(8, 4, 4096, device="cuda")  # [B, n, C]
+y = layer(x)  # [B, n, C]
 ```
 
 ## Paper
 
 **mHC: Manifold-Constrained Hyper-Connections**  
 https://arxiv.org/abs/2512.24880
-
-Zhenda Xie, Yixuan Wei, Huanqi Cao, Chenggang Zhao, Chengqi Deng, Jiashi Li, Damai Dai, Huazuo Gao, Jiang Chang, Liang Zhao, Shangyan Zhou, Zhean Xu, Zhengyan Zhang, Wangding Zeng, Shengding Hu, Yuqing Wang, Jingyang Yuan, Lean Wang, Wenfeng Liang
 
 DeepSeek-AI
 

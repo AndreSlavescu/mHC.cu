@@ -189,7 +189,7 @@ int main() {
     float max_diff = max_abs_diff(h_out_ref, h_out_gpu, B * n * C);
 
     printf("\nOutput shape: [%d, %d, %d]\n", B, n, C);
-    check_test(max_diff, 0.1f, "MHC Layer (expanded stream)");
+    check_test(max_diff, 0.1f, "MHC Layer");
 
     layer.destroy();
 

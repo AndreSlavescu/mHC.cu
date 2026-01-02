@@ -1,43 +1,24 @@
 #!/bin/bash
-set -euxo pipefail
+set -euo pipefail
 
-echo "Running checks..."
-STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cpp|cu|cuh|h)$' || true)
+STAGED_CXX=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.(c|cpp|cu|cuh|h)$' || true)
 
-if [ -n "$STAGED_FILES" ]; then
-    echo "Checking format on staged files..."
-    
-    UNFORMATTED=""
-    for file in $STAGED_FILES; do
+if [ -n "$STAGED_CXX" ]; then
+    for file in $STAGED_CXX; do
         if ! clang-format --dry-run --Werror "$file" 2>/dev/null; then
-            UNFORMATTED="$UNFORMATTED $file"
+            echo "Format error: $file"
+            echo "Run: clang-format -i $file"
+            exit 1
         fi
     done
-    
-    if [ -n "$UNFORMATTED" ]; then
-        echo "ERROR: The following files need formatting:"
-        echo "$UNFORMATTED"
-        echo ""
-        echo "Run: clang-format -i $UNFORMATTED"
+fi
+
+STAGED_PY=$(git diff --cached --name-only --diff-filter=ACM | grep -E '\.py$' || true)
+
+if [ -n "$STAGED_PY" ]; then
+    if ! black --check $STAGED_PY 2>/dev/null; then
+        echo "Format error in Python files"
+        echo "Run: black $STAGED_PY"
         exit 1
     fi
-    echo "Format check passed."
 fi
-
-if [ -d "build" ] && [ -f "build/Makefile" ]; then
-    echo "Building..."
-    cd build && make -j$(nproc) 2>&1 | tail -5
-    
-    echo "Running tests..."
-    ./test_rmsnorm || { echo "test_rmsnorm FAILED"; exit 1; }
-    ./test_sinkhorn_knopp || { echo "test_sinkhorn_knopp FAILED"; exit 1; }
-    ./test_stream_mix_tc || { echo "test_stream_mix_tc FAILED"; exit 1; }
-    ./test_mhc_layer || { echo "test_mhc_layer FAILED"; exit 1; }
-    
-    echo "All tests passed!"
-    cd ..
-else
-    echo "Warning: build directory not found, skipping tests"
-fi
-
-echo "Done checks."

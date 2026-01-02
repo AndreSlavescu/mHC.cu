@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "torch>=2.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mhc"
+version = "0.1.0"
+description = "CUDA implementation of Manifold-Constrained Hyper-Connections"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = ["torch>=2.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/AndreSlavescu/mHC.cu"
+Paper = "https://arxiv.org/abs/2512.24880"
