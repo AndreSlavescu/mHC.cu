@@ -61,11 +61,11 @@ int main() {
             h_rmsnorm_weight[i] = (floatX)((float)rand() / RAND_MAX * 0.5f + 0.75f);
         }
         for (int i = 0; i < n; i++) {
-            h_H_pre[i] = 1.0f / n;
-            h_H_post[i] = 1.0f;
+            h_H_pre[i] = 0.0f;
+            h_H_post[i] = 0.0f;
         }
         for (int i = 0; i < n * n; i++) {
-            h_H_res[i] = 1.0f + (float)rand() / RAND_MAX * 0.1f;
+            h_H_res[i] = 0.01f * ((float)rand() / RAND_MAX * 2.0f - 1.0f);
         }
 
         float* d_x_expanded;

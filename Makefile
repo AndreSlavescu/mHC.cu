@@ -1,4 +1,4 @@
-.PHONY: all build test test-python bench clean format install
+.PHONY: all build test test-python bench bench-python clean format install
 
 CUDA_ARCH ?= "80;86;89;90;100"
 BUILD_DIR = build
@@ -30,6 +30,9 @@ test-python: install
 
 bench: build
 	@for b in $(BUILD_DIR)/bench_*; do echo "Running $$b..."; $$b; done
+
+bench-python: install
+	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 python src/python/benchmarks/bench_layer.py --all-configs --backward
 
 clean:
 	rm -rf $(BUILD_DIR)

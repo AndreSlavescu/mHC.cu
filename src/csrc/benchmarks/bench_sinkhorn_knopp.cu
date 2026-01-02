@@ -121,7 +121,6 @@ int main() {
     int num_configs = sizeof(configs) / sizeof(configs[0]);
 
     printf("Sinkhorn-Knopp Forward Benchmark\n");
-    printf("Note: Small matrices are latency-bound (single block). GFLOPS will be low.\n");
     printf("=======================================================================\n");
     printf("%6s %6s %6s %12s %10s %10s %12s\n", "M", "N", "Iters", "Time (us)", "us/iter", "GFLOPS",
            "Bandwidth (GB/s)");
@@ -218,6 +217,53 @@ int main() {
 
         cudaFree(d_inp);
         cudaFree(d_out);
+        free(h_inp);
+    }
+
+    printf("\n--- Fused Exp Version (as used in MHCLayer) ---\n");
+    printf("sinkhorn_knopp_forward_fused_exp applies exp() to input before iterations.\n");
+    printf("%6s %6s %6s %12s %10s\n", "M", "N", "Iters", "Time (us)", "us/iter");
+    printf("-----------------------------------------------------------------------\n");
+
+    for (int c = 0; c < num_configs; c++) {
+        int M = configs[c].M;
+        int N = configs[c].N;
+        int num_iters = configs[c].iters;
+
+        float* h_inp = (float*)malloc(M * N * sizeof(float));
+
+        srand(42);
+        for (int i = 0; i < M * N; i++) {
+            h_inp[i] = 0.01f * ((float)rand() / RAND_MAX * 2.0f - 1.0f);
+        }
+
+        float *d_inp, *d_out, *d_exp;
+        CHECK_CUDA(cudaMalloc(&d_inp, M * N * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_out, M * N * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_exp, M * N * sizeof(float)));
+        CHECK_CUDA(cudaMemcpy(d_inp, h_inp, M * N * sizeof(float), cudaMemcpyHostToDevice));
+
+        BenchTimer timer;
+        float total_time = 0.0f;
+
+        for (int i = 0; i < bench_runs; i++) {
+            flusher.flush();
+
+            timer.record_start();
+            sinkhorn_knopp_forward_fused_exp(d_out, d_exp, d_inp, M, N, num_iters, eps);
+            timer.record_stop();
+            total_time += timer.elapsed_ms();
+        }
+
+        float avg_time_ms = total_time / bench_runs;
+        float time_us = avg_time_ms * 1000.0f;
+        float time_per_iter_us = time_us / num_iters;
+
+        printf("%6d %6d %6d %12.2f %10.2f\n", M, N, num_iters, time_us, time_per_iter_us);
+
+        cudaFree(d_inp);
+        cudaFree(d_out);
+        cudaFree(d_exp);
         free(h_inp);
     }
 

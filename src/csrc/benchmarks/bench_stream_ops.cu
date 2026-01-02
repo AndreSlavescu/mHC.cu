@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
 
 #include "../include/mhc_types.h"
 #include "../include/utils.h"
@@ -20,6 +21,8 @@ int main() {
 
     printf("Stream Ops Benchmark\n");
     printf("====================================\n");
+    printf("Note: Per paper, H_pre uses sigmoid, H_post uses 2*sigmoid activation.\n");
+    printf("Fused kernels apply activation + operation in one kernel.\n\n");
 
     printf("stream_aggregate (x[B,n,C] * H_pre[n] -> out[B,C])\n");
     printf("%8s %8s %8s %12s %12s\n", "B", "n", "C", "Time (us)", "Bandwidth (GB/s)");
@@ -172,6 +175,116 @@ int main() {
         cudaFree(d_out);
         free(h_x);
         free(h_M);
+    }
+
+    printf("\n=== FUSED KERNELS ===\n\n");
+
+    printf("stream_aggregate_bf16_fused_sigmoid\n");
+    printf("%8s %8s %8s %12s %12s\n", "B", "n", "C", "Time (us)", "Bandwidth (GB/s)");
+    printf("-----------------------------------------------------------\n");
+
+    for (int c = 0; c < num_configs; c++) {
+        int B = configs[c][0];
+        int n = configs[c][1];
+        int C = configs[c][2];
+
+        float* h_x = (float*)malloc(B * n * C * sizeof(float));
+        float* h_H = (float*)malloc(n * sizeof(float));
+
+        srand(42);
+        for (int i = 0; i < B * n * C; i++)
+            h_x[i] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
+        for (int i = 0; i < n; i++)
+            h_H[i] = 0.0f;
+
+        float *d_x, *d_H, *d_H_activated;
+        floatX* d_out;
+        CHECK_CUDA(cudaMalloc(&d_x, B * n * C * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H_activated, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_out, B * C * sizeof(floatX)));
+
+        CHECK_CUDA(cudaMemcpy(d_x, h_x, B * n * C * sizeof(float), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_H, h_H, n * sizeof(float), cudaMemcpyHostToDevice));
+
+        size_t bytes = (B * n * C + n) * sizeof(float) + B * C * sizeof(floatX);
+
+        BenchTimer timer;
+        float total_time = 0.0f;
+
+        for (int i = 0; i < bench_runs; i++) {
+            flusher.flush();
+            timer.record_start();
+            stream_aggregate_bf16_fused_sigmoid(d_out, d_H_activated, d_x, d_H, B, n, C);
+            timer.record_stop();
+            total_time += timer.elapsed_ms();
+        }
+
+        float avg_time_ms = total_time / bench_runs;
+        float bw = (bytes / 1e9f) / (avg_time_ms / 1e3f);
+
+        printf("%8d %8d %8d %12.2f %12.0f\n", B, n, C, avg_time_ms * 1000.0f, bw);
+
+        cudaFree(d_x);
+        cudaFree(d_H);
+        cudaFree(d_H_activated);
+        cudaFree(d_out);
+        free(h_x);
+        free(h_H);
+    }
+
+    printf("\nstream_distribute_from_bf16_fused_sigmoid\n");
+    printf("%8s %8s %8s %12s %12s\n", "B", "n", "C", "Time (us)", "Bandwidth (GB/s)");
+    printf("-----------------------------------------------------------\n");
+
+    for (int c = 0; c < num_configs; c++) {
+        int B = configs[c][0];
+        int n = configs[c][1];
+        int C = configs[c][2];
+
+        floatX* h_x = (floatX*)malloc(B * C * sizeof(floatX));
+        float* h_H = (float*)malloc(n * sizeof(float));
+
+        srand(42);
+        for (int i = 0; i < B * C; i++)
+            h_x[i] = (floatX)((float)rand() / RAND_MAX * 2.0f - 1.0f);
+        for (int i = 0; i < n; i++)
+            h_H[i] = 0.0f;
+
+        floatX* d_x;
+        float *d_H, *d_H_activated, *d_out;
+        CHECK_CUDA(cudaMalloc(&d_x, B * C * sizeof(floatX)));
+        CHECK_CUDA(cudaMalloc(&d_H, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H_activated, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_out, B * n * C * sizeof(float)));
+
+        CHECK_CUDA(cudaMemcpy(d_x, h_x, B * C * sizeof(floatX), cudaMemcpyHostToDevice));
+        CHECK_CUDA(cudaMemcpy(d_H, h_H, n * sizeof(float), cudaMemcpyHostToDevice));
+
+        size_t bytes = B * C * sizeof(floatX) + n * sizeof(float) + B * n * C * sizeof(float);
+
+        BenchTimer timer;
+        float total_time = 0.0f;
+
+        for (int i = 0; i < bench_runs; i++) {
+            flusher.flush();
+            timer.record_start();
+            stream_distribute_from_bf16_fused_sigmoid(d_out, d_H_activated, d_x, d_H, B, n, C);
+            timer.record_stop();
+            total_time += timer.elapsed_ms();
+        }
+
+        float avg_time_ms = total_time / bench_runs;
+        float bw = (bytes / 1e9f) / (avg_time_ms / 1e3f);
+
+        printf("%8d %8d %8d %12.2f %12.0f\n", B, n, C, avg_time_ms * 1000.0f, bw);
+
+        cudaFree(d_x);
+        cudaFree(d_H);
+        cudaFree(d_H_activated);
+        cudaFree(d_out);
+        free(h_x);
+        free(h_H);
     }
 
     return 0;
