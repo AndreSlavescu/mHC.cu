@@ -3,8 +3,12 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cublasLt.h>
+#include <cooperative_groups.h>
+#include <cooperative_groups/reduce.h>
 #include "../include/mhc_types.h"
 #include "type_conversions.cuh"
+
+namespace cg = cooperative_groups;
 
 namespace mhc {
 
@@ -697,40 +701,87 @@ stream_aggregate_backward_dx_kernel(float* __restrict__ d_inp, const float* __re
 }
 
 template<int BLOCK_SIZE, int MAX_N>
-__global__ void
-stream_aggregate_backward_dH_kernel(float* __restrict__ d_H_pre, const float* __restrict__ grad,
-                                    const float* __restrict__ inp, int B, int n, int C) {
+__global__ void stream_aggregate_backward_dH_partial_kernel(float* __restrict__ partials,
+                                                            const float* __restrict__ grad,
+                                                            const float* __restrict__ inp, int B,
+                                                            int n, int C) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+
+    __shared__ float s_warp_sums[MAX_N][BLOCK_SIZE / 32];
+
+    float local_sum[MAX_N];
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        local_sum[i] = 0.0f;
+    }
+
+    int total_bc = B * C;
+    for (int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x; idx < total_bc;
+         idx += gridDim.x * BLOCK_SIZE) {
+        int b = idx / C;
+        int c = idx % C;
+        float g = grad[idx];
+#pragma unroll
+        for (int i = 0; i < MAX_N; i++) {
+            if (i < n) {
+                local_sum[i] += g * inp[b * n * C + i * C + c];
+            }
+        }
+    }
+
+    int warp_id = threadIdx.x / 32;
+    int num_warps = BLOCK_SIZE / 32;
+
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        if (i < n) {
+            float warp_sum = cg::reduce(warp, local_sum[i], cg::plus<float>());
+            if (warp.thread_rank() == 0) {
+                s_warp_sums[i][warp_id] = warp_sum;
+            }
+        }
+    }
+    block.sync();
+
+    if (threadIdx.x < n) {
+        float block_sum = 0.0f;
+        for (int w = 0; w < num_warps; w++) {
+            block_sum += s_warp_sums[threadIdx.x][w];
+        }
+        partials[blockIdx.x * n + threadIdx.x] = block_sum;
+    }
+}
+
+template<int MAX_N>
+__global__ void reduce_partials_kernel(float* __restrict__ out, const float* __restrict__ partials,
+                                       int n, int num_partials) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+
     int i = blockIdx.x;
     if (i >= n)
         return;
 
     float sum = 0.0f;
-    for (int idx = threadIdx.x; idx < B * C; idx += BLOCK_SIZE) {
-        int b = idx / C;
-        int c = idx % C;
-        int src_idx = b * n * C + i * C + c;
-        sum += grad[idx] * inp[src_idx];
+    for (int p = threadIdx.x; p < num_partials; p += blockDim.x) {
+        sum += partials[p * n + i];
     }
 
-    __shared__ float s_partial[BLOCK_SIZE / 32];
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
+    sum = cg::reduce(warp, sum, cg::plus<float>());
 
-    for (int offset = 16; offset > 0; offset /= 2) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    __shared__ float s_warp_sums[8];
+    if (warp.thread_rank() == 0) {
+        s_warp_sums[threadIdx.x / 32] = sum;
     }
-
-    if (lane_id == 0) {
-        s_partial[warp_id] = sum;
-    }
-    __syncthreads();
+    block.sync();
 
     if (threadIdx.x == 0) {
-        float total_sum = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / 32; w++) {
-            total_sum += s_partial[w];
+        float total = 0.0f;
+        for (int w = 0; w < (blockDim.x + 31) / 32; w++) {
+            total += s_warp_sums[w];
         }
-        d_H_pre[i] = total_sum;
+        out[i] = total;
     }
 }
 
@@ -738,15 +789,23 @@ inline void stream_aggregate_backward(float* d_inp, float* d_H_pre, const float*
                                       const float* inp, const float* H_pre, int B, int n, int C,
                                       cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
+    constexpr int MAX_N = 8;
 
     int total = B * n * C;
-    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    constexpr int MAX_N = 8;
+    int num_blocks_dx = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
     stream_aggregate_backward_dx_kernel<BLOCK_SIZE, MAX_N>
-        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_pre, B, n, C);
+        <<<num_blocks_dx, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_pre, B, n, C);
 
-    stream_aggregate_backward_dH_kernel<BLOCK_SIZE, MAX_N>
-        <<<n, BLOCK_SIZE, 0, stream>>>(d_H_pre, grad, inp, B, n, C);
+    int num_blocks_dh = min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    float* partials;
+    CHECK_CUDA(cudaMallocAsync(&partials, num_blocks_dh * n * sizeof(float), stream));
+
+    stream_aggregate_backward_dH_partial_kernel<BLOCK_SIZE, MAX_N>
+        <<<num_blocks_dh, BLOCK_SIZE, 0, stream>>>(partials, grad, inp, B, n, C);
+
+    reduce_partials_kernel<MAX_N><<<n, 128, 0, stream>>>(d_H_pre, partials, n, num_blocks_dh);
+
+    CHECK_CUDA(cudaFreeAsync(partials, stream));
 }
 
 template<int BLOCK_SIZE, int MAX_N>
@@ -782,41 +841,55 @@ stream_distribute_backward_dx_kernel(float* __restrict__ d_inp, const float* __r
 }
 
 template<int BLOCK_SIZE, int MAX_N>
-__global__ void
-stream_distribute_backward_dH_kernel(float* __restrict__ d_H_post, const float* __restrict__ grad,
-                                     const float* __restrict__ inp, int B, int n, int C) {
-    int i = blockIdx.x;
-    if (i >= n)
-        return;
+__global__ void stream_distribute_backward_dH_partial_kernel(float* __restrict__ partials,
+                                                             const float* __restrict__ grad,
+                                                             const float* __restrict__ inp, int B,
+                                                             int n, int C) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
-    float sum = 0.0f;
-    for (int idx = threadIdx.x; idx < B * C; idx += BLOCK_SIZE) {
+    __shared__ float s_warp_sums[MAX_N][BLOCK_SIZE / 32];
+
+    float local_sum[MAX_N];
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        local_sum[i] = 0.0f;
+    }
+
+    int total_bc = B * C;
+    for (int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x; idx < total_bc;
+         idx += gridDim.x * BLOCK_SIZE) {
         int b = idx / C;
         int c = idx % C;
-        int grad_idx = b * n * C + i * C + c;
         float inp_val = inp[b * C + c];
-        sum += grad[grad_idx] * inp_val;
-    }
-
-    __shared__ float s_partial[BLOCK_SIZE / 32];
-    int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
-
-    for (int offset = 16; offset > 0; offset /= 2) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
-    }
-
-    if (lane_id == 0) {
-        s_partial[warp_id] = sum;
-    }
-    __syncthreads();
-
-    if (threadIdx.x == 0) {
-        float total_sum = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / 32; w++) {
-            total_sum += s_partial[w];
+#pragma unroll
+        for (int i = 0; i < MAX_N; i++) {
+            if (i < n) {
+                local_sum[i] += grad[b * n * C + i * C + c] * inp_val;
+            }
         }
-        d_H_post[i] = total_sum;
+    }
+
+    int warp_id = threadIdx.x / 32;
+    int num_warps = BLOCK_SIZE / 32;
+
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        if (i < n) {
+            float warp_sum = cg::reduce(warp, local_sum[i], cg::plus<float>());
+            if (warp.thread_rank() == 0) {
+                s_warp_sums[i][warp_id] = warp_sum;
+            }
+        }
+    }
+    block.sync();
+
+    if (threadIdx.x < n) {
+        float block_sum = 0.0f;
+        for (int w = 0; w < num_warps; w++) {
+            block_sum += s_warp_sums[threadIdx.x][w];
+        }
+        partials[blockIdx.x * n + threadIdx.x] = block_sum;
     }
 }
 
@@ -824,15 +897,23 @@ inline void stream_distribute_backward(float* d_inp, float* d_H_post, const floa
                                        const float* inp, const float* H_post, int B, int n, int C,
                                        cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
+    constexpr int MAX_N = 8;
 
     int total = B * C;
-    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    constexpr int MAX_N = 8;
+    int num_blocks_dx = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
     stream_distribute_backward_dx_kernel<BLOCK_SIZE, MAX_N>
-        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_post, B, n, C);
+        <<<num_blocks_dx, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_post, B, n, C);
 
-    stream_distribute_backward_dH_kernel<BLOCK_SIZE, MAX_N>
-        <<<n, BLOCK_SIZE, 0, stream>>>(d_H_post, grad, inp, B, n, C);
+    int num_blocks_dh = min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    float* partials;
+    CHECK_CUDA(cudaMallocAsync(&partials, num_blocks_dh * n * sizeof(float), stream));
+
+    stream_distribute_backward_dH_partial_kernel<BLOCK_SIZE, MAX_N>
+        <<<num_blocks_dh, BLOCK_SIZE, 0, stream>>>(partials, grad, inp, B, n, C);
+
+    reduce_partials_kernel<MAX_N><<<n, 128, 0, stream>>>(d_H_post, partials, n, num_blocks_dh);
+
+    CHECK_CUDA(cudaFreeAsync(partials, stream));
 }
 
 template<int BLOCK_SIZE, int MAX_N>
@@ -869,45 +950,100 @@ __global__ void stream_mix_backward_dx_kernel(float* __restrict__ d_inp,
     d_inp[idx] = sum;
 }
 
-template<int BLOCK_SIZE>
-__global__ void stream_mix_backward_dM_kernel(float* __restrict__ d_M,
-                                              const float* __restrict__ grad,
-                                              const float* __restrict__ inp, int B, int n, int C) {
-    int ij = blockIdx.x;
-    if (ij >= n * n)
-        return;
+template<int BLOCK_SIZE, int MAX_N>
+__global__ void
+stream_mix_backward_dM_partial_kernel(float* __restrict__ partials, const float* __restrict__ grad,
+                                      const float* __restrict__ inp, int B, int n, int C) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
-    int i = ij / n;
-    int j = ij % n;
+    __shared__ float s_warp_sums[MAX_N * MAX_N][BLOCK_SIZE / 32];
 
-    float sum = 0.0f;
-    for (int idx = threadIdx.x; idx < B * C; idx += BLOCK_SIZE) {
+    float local_sum[MAX_N * MAX_N];
+#pragma unroll
+    for (int k = 0; k < MAX_N * MAX_N; k++) {
+        local_sum[k] = 0.0f;
+    }
+
+    int total_bc = B * C;
+    for (int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x; idx < total_bc;
+         idx += gridDim.x * BLOCK_SIZE) {
         int b = idx / C;
         int c = idx % C;
-        int grad_idx = b * n * C + i * C + c;
-        int inp_idx = b * n * C + j * C + c;
-        sum += grad[grad_idx] * inp[inp_idx];
+#pragma unroll
+        for (int i = 0; i < MAX_N; i++) {
+            if (i < n) {
+                float g = grad[b * n * C + i * C + c];
+#pragma unroll
+                for (int j = 0; j < MAX_N; j++) {
+                    if (j < n) {
+                        float x = inp[b * n * C + j * C + c];
+                        local_sum[i * n + j] += g * x;
+                    }
+                }
+            }
+        }
     }
 
-    __shared__ float s_partial[BLOCK_SIZE / 32];
     int warp_id = threadIdx.x / 32;
-    int lane_id = threadIdx.x % 32;
+    int num_warps = BLOCK_SIZE / 32;
 
-    for (int offset = 16; offset > 0; offset /= 2) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        if (i < n) {
+#pragma unroll
+            for (int j = 0; j < MAX_N; j++) {
+                if (j < n) {
+                    int k = i * n + j;
+                    float warp_sum = cg::reduce(warp, local_sum[k], cg::plus<float>());
+                    if (warp.thread_rank() == 0) {
+                        s_warp_sums[k][warp_id] = warp_sum;
+                    }
+                }
+            }
+        }
+    }
+    block.sync();
+
+    if (threadIdx.x < n * n) {
+        float block_sum = 0.0f;
+        for (int w = 0; w < num_warps; w++) {
+            block_sum += s_warp_sums[threadIdx.x][w];
+        }
+        partials[blockIdx.x * n * n + threadIdx.x] = block_sum;
+    }
+}
+
+template<int MAX_N>
+__global__ void reduce_partials_matrix_kernel(float* __restrict__ out,
+                                              const float* __restrict__ partials, int n,
+                                              int num_partials) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+
+    int k = blockIdx.x;
+    if (k >= n * n)
+        return;
+
+    float sum = 0.0f;
+    for (int p = threadIdx.x; p < num_partials; p += blockDim.x) {
+        sum += partials[p * n * n + k];
     }
 
-    if (lane_id == 0) {
-        s_partial[warp_id] = sum;
+    sum = cg::reduce(warp, sum, cg::plus<float>());
+
+    __shared__ float s_warp_sums[8];
+    if (warp.thread_rank() == 0) {
+        s_warp_sums[threadIdx.x / 32] = sum;
     }
-    __syncthreads();
+    block.sync();
 
     if (threadIdx.x == 0) {
-        float total_sum = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / 32; w++) {
-            total_sum += s_partial[w];
+        float total = 0.0f;
+        for (int w = 0; w < (blockDim.x + 31) / 32; w++) {
+            total += s_warp_sums[w];
         }
-        d_M[ij] = total_sum;
+        out[k] = total;
     }
 }
 
@@ -915,15 +1051,24 @@ inline void stream_mix_backward(float* d_inp, float* d_M, const float* grad, con
                                 const float* M, int B, int n, int C,
                                 cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
+    constexpr int MAX_N = 8;
 
     int total = B * n * C;
-    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    constexpr int MAX_N = 8;
+    int num_blocks_dx = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
     stream_mix_backward_dx_kernel<BLOCK_SIZE, MAX_N>
-        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, grad, M, B, n, C);
+        <<<num_blocks_dx, BLOCK_SIZE, 0, stream>>>(d_inp, grad, M, B, n, C);
 
-    stream_mix_backward_dM_kernel<BLOCK_SIZE>
-        <<<n * n, BLOCK_SIZE, 0, stream>>>(d_M, grad, inp, B, n, C);
+    int num_blocks_dm = min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    float* partials;
+    CHECK_CUDA(cudaMallocAsync(&partials, num_blocks_dm * n * n * sizeof(float), stream));
+
+    stream_mix_backward_dM_partial_kernel<BLOCK_SIZE, MAX_N>
+        <<<num_blocks_dm, BLOCK_SIZE, 0, stream>>>(partials, grad, inp, B, n, C);
+
+    reduce_partials_matrix_kernel<MAX_N>
+        <<<n * n, 128, 0, stream>>>(d_M, partials, n, num_blocks_dm);
+
+    CHECK_CUDA(cudaFreeAsync(partials, stream));
 }
 
 } // namespace mhc

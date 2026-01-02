@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 
@@ -137,7 +138,8 @@ std::tuple<torch::Tensor, torch::Tensor> stream_mix_bwd(torch::Tensor grad, torc
     return {d_inp, d_M};
 }
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor,
+           torch::Tensor>
 mhc_layer_fwd(torch::Tensor x_expanded, torch::Tensor rmsnorm_weight, torch::Tensor H_pre,
               torch::Tensor H_post, torch::Tensor H_res, int sinkhorn_iters, float eps) {
     CHECK_INPUT(x_expanded);
@@ -180,7 +182,74 @@ mhc_layer_fwd(torch::Tensor x_expanded, torch::Tensor rmsnorm_weight, torch::Ten
     stream_mix_add(output.data_ptr<float>(), x_f32.data_ptr<float>(), y_dist.data_ptr<float>(),
                    M.data_ptr<float>(), B, n, C);
 
-    return {output, rms, x_agg_bf16, H_pre_activated, H_post_activated, H_res_exp};
+    return {output, rms, x_agg_bf16, H_pre_activated, H_post_activated, M, y_norm_bf16};
+}
+
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+mhc_layer_bwd(torch::Tensor grad_output, torch::Tensor x_expanded, torch::Tensor rmsnorm_weight,
+              torch::Tensor rms, torch::Tensor x_agg_bf16, torch::Tensor H_pre_activated,
+              torch::Tensor H_post_activated, torch::Tensor M, torch::Tensor y_norm_bf16,
+              torch::Tensor H_res, int sinkhorn_iters, float eps) {
+    CHECK_INPUT(grad_output);
+    CHECK_INPUT(x_expanded);
+    CHECK_INPUT(rmsnorm_weight);
+    CHECK_INPUT(rms);
+    CHECK_INPUT(x_agg_bf16);
+    CHECK_INPUT(H_pre_activated);
+    CHECK_INPUT(H_post_activated);
+    CHECK_INPUT(M);
+    CHECK_INPUT(y_norm_bf16);
+    CHECK_INPUT(H_res);
+
+    int B = x_expanded.size(0), n = x_expanded.size(1), C = x_expanded.size(2);
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    auto grad_f32 = grad_output.to(torch::kFloat32).contiguous();
+    auto x_f32 = x_expanded.to(torch::kFloat32).contiguous();
+    auto y_norm_f32 = y_norm_bf16.to(torch::kFloat32).contiguous();
+
+    auto d_x_mix = torch::empty({B, n, C}, grad_output.options().dtype(torch::kFloat32));
+    auto d_M = torch::empty({n, n}, grad_output.options().dtype(torch::kFloat32));
+
+    stream_mix_backward(d_x_mix.data_ptr<float>(), d_M.data_ptr<float>(),
+                        grad_f32.data_ptr<float>(), x_f32.data_ptr<float>(), M.data_ptr<float>(), B,
+                        n, C, stream);
+
+    auto d_y_norm = torch::empty({B, C}, grad_output.options().dtype(torch::kFloat32));
+    auto d_H_post_activated = torch::empty({n}, grad_output.options().dtype(torch::kFloat32));
+
+    stream_distribute_backward(d_y_norm.data_ptr<float>(), d_H_post_activated.data_ptr<float>(),
+                               grad_f32.data_ptr<float>(), y_norm_f32.data_ptr<float>(),
+                               H_post_activated.data_ptr<float>(), B, n, C, stream);
+
+    auto d_H_post = d_H_post_activated * H_post_activated * (1.0f - H_post_activated / 2.0f);
+
+    auto H_res_exp = torch::exp(H_res);
+    auto d_H_res_exp = torch::empty({n, n}, grad_output.options().dtype(torch::kFloat32));
+    sinkhorn_knopp_backward(d_H_res_exp.data_ptr<float>(), d_M.data_ptr<float>(),
+                            M.data_ptr<float>(), H_res_exp.data_ptr<float>(), n, sinkhorn_iters,
+                            eps, stream);
+    auto d_H_res = d_H_res_exp * H_res_exp;
+
+    auto d_x_agg = torch::empty({B, C}, grad_output.options().dtype(torch::kFloat32));
+    auto d_rmsnorm_weight = torch::zeros({C}, grad_output.options().dtype(torch::kFloat32));
+    rmsnorm_backward(d_x_agg.data_ptr<float>(), d_rmsnorm_weight.data_ptr<float>(),
+                     d_y_norm.data_ptr<float>(),
+                     reinterpret_cast<const floatX*>(x_agg_bf16.data_ptr<at::BFloat16>()),
+                     reinterpret_cast<const floatX*>(rmsnorm_weight.data_ptr<at::BFloat16>()),
+                     rms.data_ptr<float>(), B, C, stream);
+
+    auto d_x_from_agg = torch::empty({B, n, C}, grad_output.options().dtype(torch::kFloat32));
+    auto d_H_pre_activated = torch::empty({n}, grad_output.options().dtype(torch::kFloat32));
+    stream_aggregate_backward(d_x_from_agg.data_ptr<float>(), d_H_pre_activated.data_ptr<float>(),
+                              d_x_agg.data_ptr<float>(), x_f32.data_ptr<float>(),
+                              H_pre_activated.data_ptr<float>(), B, n, C, stream);
+
+    auto d_H_pre = d_H_pre_activated * H_pre_activated * (1.0f - H_pre_activated);
+
+    auto d_x_expanded = d_x_mix + d_x_from_agg;
+
+    return {d_x_expanded, d_rmsnorm_weight, d_H_pre, d_H_post, d_H_res};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -195,4 +264,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("stream_mix_fwd", &stream_mix_fwd);
     m.def("stream_mix_bwd", &stream_mix_bwd);
     m.def("mhc_layer_fwd", &mhc_layer_fwd);
+    m.def("mhc_layer_bwd", &mhc_layer_bwd);
 }

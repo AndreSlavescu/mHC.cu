@@ -122,7 +122,8 @@ class MHCLayerFunction(Function):
             x_agg_bf16,
             H_pre_activated,
             H_post_activated,
-            H_res_exp,
+            M,
+            y_norm_bf16,
         ) = mhc_cuda.mhc_layer_fwd(
             x_expanded.contiguous(),
             rmsnorm_weight.contiguous(),
@@ -140,7 +141,9 @@ class MHCLayerFunction(Function):
             x_agg_bf16,
             H_pre_activated,
             H_post_activated,
-            H_res_exp,
+            M,
+            y_norm_bf16,
+            H_res,
         )
         ctx.sinkhorn_iters = sinkhorn_iters
         ctx.eps = eps
@@ -155,45 +158,27 @@ class MHCLayerFunction(Function):
             x_agg_bf16,
             H_pre_activated,
             H_post_activated,
-            H_res_exp,
+            M,
+            y_norm_bf16,
+            H_res,
         ) = ctx.saved_tensors
 
-        B, n, C = x_expanded.shape
-        x_f32 = x_expanded.float().contiguous()
-        grad_f32 = grad_output.float().contiguous()
-
-        M = mhc_cuda.sinkhorn_knopp_fwd(H_res_exp, ctx.sinkhorn_iters, ctx.eps)
-
-        d_x_mixed, d_M = mhc_cuda.stream_mix_bwd(grad_f32, x_f32, M)
-
-        d_H_res_exp = mhc_cuda.sinkhorn_knopp_bwd(
-            d_M, M, H_res_exp, ctx.sinkhorn_iters, ctx.eps
-        )
-        d_H_res = d_H_res_exp * H_res_exp
-
-        y_norm_bf16 = mhc_cuda.rmsnorm_fwd(x_agg_bf16, rmsnorm_weight, ctx.eps)[0]
-        y_norm_f32 = y_norm_bf16.float()
-
-        d_y_norm, d_H_post_activated = mhc_cuda.stream_distribute_bwd(
-            grad_f32, y_norm_f32, H_post_activated
-        )
-        d_H_post = (
-            d_H_post_activated * H_post_activated * (1.0 - H_post_activated / 2.0)
+        d_x, d_rmsnorm_weight, d_H_pre, d_H_post, d_H_res = mhc_cuda.mhc_layer_bwd(
+            grad_output.contiguous(),
+            x_expanded.contiguous(),
+            rmsnorm_weight.contiguous(),
+            rms.contiguous(),
+            x_agg_bf16.contiguous(),
+            H_pre_activated.contiguous(),
+            H_post_activated.contiguous(),
+            M.contiguous(),
+            y_norm_bf16.contiguous(),
+            H_res.contiguous(),
+            ctx.sinkhorn_iters,
+            ctx.eps,
         )
 
-        d_x_agg, d_rmsnorm_weight = mhc_cuda.rmsnorm_bwd(
-            d_y_norm.bfloat16(), x_agg_bf16, rmsnorm_weight, rms
-        )
-        d_x_agg_f32 = d_x_agg.float()
-
-        d_x_from_agg, d_H_pre_activated = mhc_cuda.stream_aggregate_bwd(
-            d_x_agg_f32, x_f32, H_pre_activated
-        )
-        d_H_pre = d_H_pre_activated * H_pre_activated * (1.0 - H_pre_activated)
-
-        d_x_expanded = d_x_mixed + d_x_from_agg
-
-        return d_x_expanded, d_rmsnorm_weight, d_H_pre, d_H_post, d_H_res, None, None
+        return d_x, d_rmsnorm_weight, d_H_pre, d_H_post, d_H_res, None, None
 
 
 def mhc_layer_fused(
