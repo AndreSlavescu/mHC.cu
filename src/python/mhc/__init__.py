@@ -5,6 +5,7 @@ from .ops import (
     stream_aggregate,
     stream_distribute,
     stream_mix,
+    mhc_layer_fused,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "stream_aggregate",
     "stream_distribute",
     "stream_mix",
+    "mhc_layer_fused",
 ]

@@ -1,9 +1,10 @@
 build/
 .vscode/
 .idea/
-
 __pycache__/
 mhc.egg-info/
 mhc_cuda.cpython*
 mhc_cuda.so
 mhc_cuda.pyd
+arXiv*
+.pytest_cache/

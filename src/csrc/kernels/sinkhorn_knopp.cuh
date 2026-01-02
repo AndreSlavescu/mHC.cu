@@ -5,6 +5,7 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include "../include/mhc_types.h"
+#include "type_conversions.cuh"
 
 namespace cg = cooperative_groups;
 
@@ -356,6 +357,68 @@ __global__ void sinkhorn_knopp_single_block_kernel(float* __restrict__ out,
     }
 }
 
+template<int MAX_DIM, int BLOCK_SIZE>
+__global__ void sinkhorn_knopp_single_block_fused_exp_kernel(float* __restrict__ out,
+                                                             float* __restrict__ H_res_exp,
+                                                             const float* __restrict__ inp, int M,
+                                                             int N, int num_iters, float eps) {
+    extern __shared__ float smem[];
+    float* tile = smem;
+    float* row_sums = smem + MAX_DIM * MAX_DIM;
+    float* col_sums = row_sums + MAX_DIM;
+
+    int total_elems = M * N;
+
+    for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
+        float val = fast_exp(inp[i]);
+        tile[i] = val;
+        H_res_exp[i] = val;
+    }
+    __syncthreads();
+
+    for (int iter = 0; iter < num_iters; iter++) {
+        for (int r = threadIdx.x; r < M; r += BLOCK_SIZE) {
+            float sum = 0.0f;
+            for (int c = 0; c < N; c++) {
+                sum += tile[r * N + c];
+            }
+            row_sums[r] = sum;
+        }
+        __syncthreads();
+
+        for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
+            int r = i / N;
+            float row_sum = row_sums[r];
+            if (row_sum > eps) {
+                tile[i] *= __frcp_rn(row_sum);
+            }
+        }
+        __syncthreads();
+
+        for (int c = threadIdx.x; c < N; c += BLOCK_SIZE) {
+            float sum = 0.0f;
+            for (int r = 0; r < M; r++) {
+                sum += tile[r * N + c];
+            }
+            col_sums[c] = sum;
+        }
+        __syncthreads();
+
+        for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
+            int c = i % N;
+            float col_sum = col_sums[c];
+            if (col_sum > eps) {
+                tile[i] *= __frcp_rn(col_sum);
+            }
+        }
+        __syncthreads();
+    }
+
+    for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
+        out[i] = tile[i];
+    }
+}
+
 inline void sinkhorn_knopp_forward(float* out, const float* inp, int M, int N, int num_iters,
                                    float eps, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
@@ -391,6 +454,32 @@ inline void sinkhorn_knopp_forward(float* out, const float* inp, int M, int N, i
 
         sinkhorn_knopp_kernel<TILE_SIZE, TILE_SIZE, BLOCK_SIZE>
             <<<grid, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps);
+    }
+}
+
+inline void sinkhorn_knopp_forward_fused_exp(float* out, float* H_res_exp, const float* inp, int M,
+                                             int N, int num_iters, float eps,
+                                             cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    if (M <= 64 && N <= 64) {
+        constexpr int MAX_DIM = 64;
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+
+        sinkhorn_knopp_single_block_fused_exp_kernel<MAX_DIM, BLOCK_SIZE>
+            <<<1, BLOCK_SIZE, smem_size, stream>>>(out, H_res_exp, inp, M, N, num_iters, eps);
+    } else if (M <= 128 && N <= 128) {
+        constexpr int MAX_DIM = 128;
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+
+        auto kernel = sinkhorn_knopp_single_block_fused_exp_kernel<MAX_DIM, BLOCK_SIZE>;
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+        kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, H_res_exp, inp, M, N, num_iters, eps);
+    } else {
+        fprintf(stderr, "sinkhorn_knopp_forward_fused_exp: M > 128 or N > 128 not supported\n");
     }
 }
 

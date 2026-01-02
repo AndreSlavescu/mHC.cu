@@ -14,6 +14,10 @@
 
 using namespace mhc;
 
+float sigmoid_cpu(float x) {
+    return 1.0f / (1.0f + expf(-x));
+}
+
 void rmsnorm_cpu(float* out, const float* inp, const floatX* weight, int B, int C, float eps) {
     for (int b = 0; b < B; b++) {
         float sum_sq = 0.0f;
@@ -128,6 +132,9 @@ int main() {
     float* h_out_gpu = (float*)malloc(B * n * C * sizeof(float));
     float* h_out_ref = (float*)malloc(B * n * C * sizeof(float));
 
+    float* h_H_pre_activated = (float*)malloc(n * sizeof(float));
+    float* h_H_post_activated = (float*)malloc(n * sizeof(float));
+
     srand(42);
     for (int i = 0; i < B * n * C; i++) {
         h_x_expanded[i] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
@@ -136,17 +143,19 @@ int main() {
         h_rmsnorm_weight[i] = (floatX)((float)rand() / RAND_MAX * 0.5f + 0.75f);
     }
     for (int i = 0; i < n; i++) {
-        h_H_pre[i] = 1.0f / n;
-        h_H_post[i] = 1.0f;
+        h_H_pre[i] = 0.0f;
+        h_H_post[i] = 0.0f;
+        h_H_pre_activated[i] = sigmoid_cpu(h_H_pre[i]);
+        h_H_post_activated[i] = 2.0f * sigmoid_cpu(h_H_post[i]);
     }
     for (int i = 0; i < n * n; i++) {
-        h_H_res[i] = 1.0f + (float)rand() / RAND_MAX * 0.1f;
-        h_M[i] = h_H_res[i];
+        h_H_res[i] = 0.01f * ((float)rand() / RAND_MAX * 2.0f - 1.0f);
+        h_M[i] = expf(h_H_res[i]);
     }
 
     sinkhorn_cpu(h_M, n, 20);
-    mhc_layer_cpu_reference(h_out_ref, h_x_expanded, h_H_pre, h_H_post, h_M, h_rmsnorm_weight, B, n,
-                            C, 1e-5f);
+    mhc_layer_cpu_reference(h_out_ref, h_x_expanded, h_H_pre_activated, h_H_post_activated, h_M,
+                            h_rmsnorm_weight, B, n, C, 1e-5f);
 
     MHCLayerConfig config;
     config.batch_size = B;
@@ -197,6 +206,8 @@ int main() {
     free(h_rmsnorm_weight);
     free(h_H_pre);
     free(h_H_post);
+    free(h_H_pre_activated);
+    free(h_H_post_activated);
     free(h_H_res);
     free(h_M);
     free(h_out_gpu);

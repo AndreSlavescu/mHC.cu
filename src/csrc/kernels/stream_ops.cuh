@@ -4,6 +4,7 @@
 #include <cuda_bf16.h>
 #include <cublasLt.h>
 #include "../include/mhc_types.h"
+#include "type_conversions.cuh"
 
 namespace mhc {
 
@@ -236,6 +237,42 @@ __global__ void stream_aggregate_bf16_kernel(floatX* __restrict__ out,
 }
 
 template<int BLOCK_SIZE, int MAX_N>
+__global__ void stream_aggregate_bf16_fused_sigmoid_kernel(floatX* __restrict__ out,
+                                                           float* __restrict__ H_pre_activated,
+                                                           const float* __restrict__ inp,
+                                                           const float* __restrict__ H_pre_raw,
+                                                           int B, int n, int C) {
+    __shared__ float s_H_pre[MAX_N];
+
+    if (threadIdx.x < n) {
+        float activated = fast_sigmoid(H_pre_raw[threadIdx.x]);
+        s_H_pre[threadIdx.x] = activated;
+        H_pre_activated[threadIdx.x] = activated;
+    }
+    __syncthreads();
+
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * C;
+
+    if (idx >= total)
+        return;
+
+    int b = idx / C;
+    int c = idx % C;
+
+    float sum = 0.0f;
+#pragma unroll
+    for (int i = 0; i < MAX_N; i++) {
+        if (i < n) {
+            int src_idx = b * n * C + i * C + c;
+            sum += s_H_pre[i] * inp[src_idx];
+        }
+    }
+
+    out[idx] = (floatX)sum;
+}
+
+template<int BLOCK_SIZE, int MAX_N>
 __global__ void
 stream_distribute_from_bf16_kernel(float* __restrict__ out, const floatX* __restrict__ inp,
                                    const float* __restrict__ H_post, int B, int n, int C) {
@@ -243,6 +280,35 @@ stream_distribute_from_bf16_kernel(float* __restrict__ out, const floatX* __rest
 
     if (threadIdx.x < n) {
         s_H_post[threadIdx.x] = H_post[threadIdx.x];
+    }
+    __syncthreads();
+
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * n * C;
+
+    if (idx >= total)
+        return;
+
+    int b = idx / (n * C);
+    int remainder = idx % (n * C);
+    int stream = remainder / C;
+    int c = remainder % C;
+
+    int src_idx = b * C + c;
+    float val = (float)inp[src_idx];
+    out[idx] = s_H_post[stream] * val;
+}
+
+template<int BLOCK_SIZE, int MAX_N>
+__global__ void stream_distribute_from_bf16_fused_sigmoid_kernel(
+    float* __restrict__ out, float* __restrict__ H_post_activated, const floatX* __restrict__ inp,
+    const float* __restrict__ H_post_raw, int B, int n, int C) {
+    __shared__ float s_H_post[MAX_N];
+
+    if (threadIdx.x < n) {
+        float activated = 2.0f * fast_sigmoid(H_post_raw[threadIdx.x]);
+        s_H_post[threadIdx.x] = activated;
+        H_post_activated[threadIdx.x] = activated;
     }
     __syncthreads();
 
@@ -538,6 +604,22 @@ inline void stream_aggregate_bf16(floatX* out, const float* inp, const float* H_
     }
 }
 
+inline void stream_aggregate_bf16_fused_sigmoid(floatX* out, float* H_pre_activated,
+                                                const float* inp, const float* H_pre_raw, int B,
+                                                int n, int C, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int total = B * C;
+    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    if (n <= 8) {
+        constexpr int MAX_N = 8;
+        stream_aggregate_bf16_fused_sigmoid_kernel<BLOCK_SIZE, MAX_N>
+            <<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, H_pre_activated, inp, H_pre_raw, B, n, C);
+    } else {
+        fprintf(stderr, "stream_aggregate_bf16_fused_sigmoid: n > 8 not implemented\n");
+    }
+}
+
 inline void stream_distribute_from_bf16(float* out, const floatX* inp, const float* H_post, int B,
                                         int n, int C, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
@@ -550,6 +632,24 @@ inline void stream_distribute_from_bf16(float* out, const floatX* inp, const flo
             <<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, H_post, B, n, C);
     } else {
         fprintf(stderr, "stream_distribute_from_bf16: n > 8 not implemented\n");
+    }
+}
+
+inline void stream_distribute_from_bf16_fused_sigmoid(float* out, float* H_post_activated,
+                                                      const floatX* inp, const float* H_post_raw,
+                                                      int B, int n, int C,
+                                                      cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int total = B * n * C;
+    int num_blocks = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    if (n <= 8) {
+        constexpr int MAX_N = 8;
+        stream_distribute_from_bf16_fused_sigmoid_kernel<BLOCK_SIZE, MAX_N>
+            <<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, H_post_activated, inp, H_post_raw, B, n,
+                                                    C);
+    } else {
+        fprintf(stderr, "stream_distribute_from_bf16_fused_sigmoid: n > 8 not implemented\n");
     }
 }
 

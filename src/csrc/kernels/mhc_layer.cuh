@@ -6,6 +6,7 @@
 #include "rmsnorm.cuh"
 #include "sinkhorn_knopp.cuh"
 #include "stream_ops.cuh"
+#include "type_conversions.cuh"
 
 namespace mhc {
 
@@ -72,6 +73,10 @@ struct MHCLayerBuffers {
     float* x_mixed;
     float* output;
 
+    float* H_pre_activated;
+    float* H_post_activated;
+    float* H_res_exp;
+
     bool initialized;
     int batch_size;
     int hidden_dim;
@@ -97,6 +102,10 @@ struct MHCLayerBuffers {
         }
         CHECK_CUDA(cudaMalloc(&output, B * n * C * sizeof(float)));
 
+        CHECK_CUDA(cudaMalloc(&H_pre_activated, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&H_post_activated, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&H_res_exp, n * n * sizeof(float)));
+
         initialized = true;
     }
 
@@ -116,6 +125,10 @@ struct MHCLayerBuffers {
             cudaFree(x_mixed);
         cudaFree(output);
 
+        cudaFree(H_pre_activated);
+        cudaFree(H_post_activated);
+        cudaFree(H_res_exp);
+
         initialized = false;
     }
 };
@@ -132,6 +145,10 @@ struct MHCLayerGradients {
     float* d_x_mixed;
     float* d_M;
 
+    float* d_H_pre_activated;
+    float* d_H_post_activated;
+    float* d_H_res_exp;
+
     bool initialized;
 
     MHCLayerGradients() : initialized(false) {}
@@ -147,6 +164,10 @@ struct MHCLayerGradients {
         CHECK_CUDA(cudaMalloc(&d_y_distributed, B * n * C * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&d_x_mixed, B * n * C * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&d_M, n * n * sizeof(float)));
+
+        CHECK_CUDA(cudaMalloc(&d_H_pre_activated, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H_post_activated, n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&d_H_res_exp, n * n * sizeof(float)));
 
         initialized = true;
     }
@@ -166,6 +187,10 @@ struct MHCLayerGradients {
         cudaFree(d_x_mixed);
         cudaFree(d_M);
 
+        cudaFree(d_H_pre_activated);
+        cudaFree(d_H_post_activated);
+        cudaFree(d_H_res_exp);
+
         initialized = false;
     }
 
@@ -178,33 +203,103 @@ struct MHCLayerGradients {
 };
 
 template<int BLOCK_SIZE>
-__global__ void float_to_bf16_kernel(floatX* __restrict__ out, const float* __restrict__ inp,
-                                     int size) {
+__global__ void sigmoid_kernel(float* __restrict__ out, const float* __restrict__ inp, int size) {
     int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
     if (idx < size) {
-        out[idx] = (floatX)inp[idx];
+        float x = inp[idx];
+        out[idx] = 1.0f / (1.0f + expf(-x));
     }
 }
 
 template<int BLOCK_SIZE>
-__global__ void bf16_to_float_kernel(float* __restrict__ out, const floatX* __restrict__ inp,
-                                     int size) {
+__global__ void sigmoid_scale_kernel(float* __restrict__ out, const float* __restrict__ inp,
+                                     float scale, int size) {
     int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
     if (idx < size) {
-        out[idx] = (float)inp[idx];
+        float x = inp[idx];
+        out[idx] = scale / (1.0f + expf(-x));
     }
 }
 
-inline void float_to_bf16(floatX* out, const float* inp, int size, cudaStream_t stream = nullptr) {
-    constexpr int BLOCK_SIZE = 256;
-    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    float_to_bf16_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, size);
+template<int BLOCK_SIZE>
+__global__ void exp_kernel(float* __restrict__ out, const float* __restrict__ inp, int size) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    if (idx < size) {
+        out[idx] = expf(inp[idx]);
+    }
 }
 
-inline void bf16_to_float(float* out, const floatX* inp, int size, cudaStream_t stream = nullptr) {
+template<int BLOCK_SIZE>
+__global__ void sigmoid_backward_kernel(float* __restrict__ d_inp, const float* __restrict__ d_out,
+                                        const float* __restrict__ activated, int size) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    if (idx < size) {
+        float s = activated[idx];
+        d_inp[idx] = d_out[idx] * s * (1.0f - s);
+    }
+}
+
+template<int BLOCK_SIZE>
+__global__ void
+sigmoid_scale_backward_kernel(float* __restrict__ d_inp, const float* __restrict__ d_out,
+                              const float* __restrict__ activated, float scale, int size) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    if (idx < size) {
+        float s = activated[idx] / scale;
+        d_inp[idx] = d_out[idx] * scale * s * (1.0f - s);
+    }
+}
+
+template<int BLOCK_SIZE>
+__global__ void exp_backward_kernel(float* __restrict__ d_inp, const float* __restrict__ d_out,
+                                    const float* __restrict__ exp_val, int size) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    if (idx < size) {
+        d_inp[idx] = d_out[idx] * exp_val[idx];
+    }
+}
+
+inline void apply_sigmoid(float* out, const float* inp, int size, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
     int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    bf16_to_float_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, size);
+    sigmoid_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, size);
+}
+
+inline void apply_sigmoid_scale(float* out, const float* inp, float scale, int size,
+                                cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    sigmoid_scale_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, scale, size);
+}
+
+inline void apply_exp(float* out, const float* inp, int size, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    exp_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, size);
+}
+
+inline void sigmoid_backward(float* d_inp, const float* d_out, const float* activated, int size,
+                             cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    sigmoid_backward_kernel<BLOCK_SIZE>
+        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, d_out, activated, size);
+}
+
+inline void sigmoid_scale_backward(float* d_inp, const float* d_out, const float* activated,
+                                   float scale, int size, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    sigmoid_scale_backward_kernel<BLOCK_SIZE>
+        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, d_out, activated, scale, size);
+}
+
+inline void exp_backward(float* d_inp, const float* d_out, const float* exp_val, int size,
+                         cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    exp_backward_kernel<BLOCK_SIZE>
+        <<<num_blocks, BLOCK_SIZE, 0, stream>>>(d_inp, d_out, exp_val, size);
 }
 
 struct MHCLayer {
@@ -301,26 +396,19 @@ struct MHCLayer {
         CHECK_CUDA(cudaMemcpyAsync(buffers.x_expanded, x_expanded, B * n * C * sizeof(float),
                                    cudaMemcpyHostToDevice, stream));
 
-        stream_aggregate_bf16(buffers.x_aggregated_bf16, buffers.x_expanded, weights.H_pre, B, n, C,
-                              stream);
+        stream_aggregate_bf16_fused_sigmoid(buffers.x_aggregated_bf16, buffers.H_pre_activated,
+                                            buffers.x_expanded, weights.H_pre, B, n, C, stream);
 
         rmsnorm_forward_with_rms(buffers.layer_out_bf16, buffers.rms_values,
                                  buffers.x_aggregated_bf16, weights.rmsnorm_weight, B, C,
                                  config.eps, stream);
 
-        stream_distribute_from_bf16(buffers.y_distributed, buffers.layer_out_bf16, weights.H_post,
-                                    B, n, C, stream);
+        stream_distribute_from_bf16_fused_sigmoid(buffers.y_distributed, buffers.H_post_activated,
+                                                  buffers.layer_out_bf16, weights.H_post, B, n, C,
+                                                  stream);
 
-#ifdef MHC_ENABLE_PDL
-        if (config.use_pdl) {
-            sinkhorn_knopp_forward_pdl(buffers.sinkhorn_M, weights.H_res, n, n,
-                                       config.sinkhorn_iters, config.eps, stream);
-        } else
-#endif
-        {
-            sinkhorn_knopp_forward(buffers.sinkhorn_M, weights.H_res, n, n, config.sinkhorn_iters,
-                                   config.eps, stream);
-        }
+        sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res, n, n,
+                                         config.sinkhorn_iters, config.eps, stream);
 
         if (use_tc_mix) {
             stream_mix_tc.forward(buffers.x_mixed, buffers.x_expanded, buffers.sinkhorn_M, stream);
@@ -339,26 +427,19 @@ struct MHCLayer {
         CHECK_CUDA(cudaMemcpyAsync(buffers.x_expanded, d_x_expanded, B * n * C * sizeof(float),
                                    cudaMemcpyDeviceToDevice, stream));
 
-        stream_aggregate_bf16(buffers.x_aggregated_bf16, buffers.x_expanded, weights.H_pre, B, n, C,
-                              stream);
+        stream_aggregate_bf16_fused_sigmoid(buffers.x_aggregated_bf16, buffers.H_pre_activated,
+                                            buffers.x_expanded, weights.H_pre, B, n, C, stream);
 
         rmsnorm_forward_with_rms(buffers.layer_out_bf16, buffers.rms_values,
                                  buffers.x_aggregated_bf16, weights.rmsnorm_weight, B, C,
                                  config.eps, stream);
 
-        stream_distribute_from_bf16(buffers.y_distributed, buffers.layer_out_bf16, weights.H_post,
-                                    B, n, C, stream);
+        stream_distribute_from_bf16_fused_sigmoid(buffers.y_distributed, buffers.H_post_activated,
+                                                  buffers.layer_out_bf16, weights.H_post, B, n, C,
+                                                  stream);
 
-#ifdef MHC_ENABLE_PDL
-        if (config.use_pdl) {
-            sinkhorn_knopp_forward_pdl(buffers.sinkhorn_M, weights.H_res, n, n,
-                                       config.sinkhorn_iters, config.eps, stream);
-        } else
-#endif
-        {
-            sinkhorn_knopp_forward(buffers.sinkhorn_M, weights.H_res, n, n, config.sinkhorn_iters,
-                                   config.eps, stream);
-        }
+        sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res, n, n,
+                                         config.sinkhorn_iters, config.eps, stream);
 
         if (use_tc_mix) {
             stream_mix_tc.forward(buffers.x_mixed, buffers.x_expanded, buffers.sinkhorn_M, stream);
@@ -393,13 +474,19 @@ struct MHCLayer {
         CHECK_CUDA(cudaMemcpyAsync(grads.d_y_distributed, d_output, B * n * C * sizeof(float),
                                    cudaMemcpyDeviceToDevice, stream));
 
-        sinkhorn_knopp_backward(grads.d_H_res, grads.d_M, buffers.sinkhorn_M, weights.H_res, n,
-                                config.sinkhorn_iters, config.eps, stream);
+        sinkhorn_knopp_backward(grads.d_H_res_exp, grads.d_M, buffers.sinkhorn_M, buffers.H_res_exp,
+                                n, config.sinkhorn_iters, config.eps, stream);
+
+        exp_backward(grads.d_H_res, grads.d_H_res_exp, buffers.H_res_exp, n * n, stream);
 
         bf16_to_float(buffers.layer_out_f32, buffers.layer_out_bf16, B * C, stream);
 
-        stream_distribute_backward(grads.d_layer_out, grads.d_H_post, grads.d_y_distributed,
-                                   buffers.layer_out_f32, weights.H_post, B, n, C, stream);
+        stream_distribute_backward(grads.d_layer_out, grads.d_H_post_activated,
+                                   grads.d_y_distributed, buffers.layer_out_f32,
+                                   buffers.H_post_activated, B, n, C, stream);
+
+        sigmoid_scale_backward(grads.d_H_post, grads.d_H_post_activated, buffers.H_post_activated,
+                               2.0f, n, stream);
 
         bf16_to_float(buffers.x_aggregated_f32, buffers.x_aggregated_bf16, B * C, stream);
 
@@ -407,8 +494,11 @@ struct MHCLayer {
                          buffers.x_aggregated_bf16, weights.rmsnorm_weight, buffers.rms_values, B,
                          C, stream);
 
-        stream_aggregate_backward(grads.d_x_expanded, grads.d_H_pre, grads.d_x_aggregated,
-                                  buffers.x_expanded, weights.H_pre, B, n, C, stream);
+        stream_aggregate_backward(grads.d_x_expanded, grads.d_H_pre_activated, grads.d_x_aggregated,
+                                  buffers.x_expanded, buffers.H_pre_activated, B, n, C, stream);
+
+        sigmoid_backward(grads.d_H_pre, grads.d_H_pre_activated, buffers.H_pre_activated, n,
+                         stream);
     }
 
     float* get_dx() { return grads.d_x_expanded; }

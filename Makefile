@@ -11,8 +11,19 @@ build:
 	cmake --build $(BUILD_DIR) -j$$(nproc)
 
 test: build
-	@for t in $(BUILD_DIR)/test_*; do echo "Running $$t..."; $$t || exit 1; done
-	@echo "All C++ tests passed."
+	@failed=0; \
+	for t in $(BUILD_DIR)/test_*; do \
+		echo "Running $$t..."; \
+		if ! $$t; then \
+			failed=1; \
+		fi; \
+	done; \
+	if [ $$failed -eq 0 ]; then \
+		echo "All C++ tests passed."; \
+	else \
+		echo "Some C++ tests FAILED."; \
+		exit 1; \
+	fi
 
 test-python: install
 	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 pytest src/python/tests -v

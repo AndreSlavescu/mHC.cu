@@ -1,12 +1,6 @@
 import torch
 import torch.nn as nn
-from .ops import (
-    sinkhorn_knopp,
-    rmsnorm,
-    stream_aggregate,
-    stream_distribute,
-    stream_mix,
-)
+from .ops import mhc_layer_fused
 
 
 class MHCLayer(nn.Module):
@@ -30,13 +24,9 @@ class MHCLayer(nn.Module):
         self.eps = eps
 
         self.rmsnorm_weight = nn.Parameter(torch.ones(hidden_dim, dtype=torch.bfloat16))
-        self.H_pre = nn.Parameter(
-            torch.ones(expansion_rate, dtype=torch.float32) / expansion_rate
-        )
-        self.H_post = nn.Parameter(torch.ones(expansion_rate, dtype=torch.float32))
-        H_res_init = torch.eye(expansion_rate) + alpha_init * torch.randn(
-            expansion_rate, expansion_rate
-        )
+        self.H_pre = nn.Parameter(torch.zeros(expansion_rate, dtype=torch.float32))
+        self.H_post = nn.Parameter(torch.zeros(expansion_rate, dtype=torch.float32))
+        H_res_init = alpha_init * torch.randn(expansion_rate, expansion_rate)
         self.H_res = nn.Parameter(H_res_init.float())
 
     def forward(self, x_expanded: torch.Tensor) -> torch.Tensor:
@@ -44,13 +34,12 @@ class MHCLayer(nn.Module):
         assert n == self.expansion_rate
         assert C == self.hidden_dim
 
-        x = x_expanded.float().contiguous()
-
-        x_agg = stream_aggregate(x, self.H_pre)
-        y_norm = rmsnorm(x_agg, self.rmsnorm_weight, self.eps)
-        y_dist = stream_distribute(y_norm.float(), self.H_post)
-        M = sinkhorn_knopp(self.H_res, self.sinkhorn_iters, self.eps)
-        x_mixed = stream_mix(x, M)
-        out = x_mixed + y_dist
-
-        return out
+        return mhc_layer_fused(
+            x_expanded,
+            self.rmsnorm_weight,
+            self.H_pre,
+            self.H_post,
+            self.H_res,
+            self.sinkhorn_iters,
+            self.eps,
+        )

@@ -6,6 +6,7 @@
 #include "../csrc/kernels/rmsnorm.cuh"
 #include "../csrc/kernels/sinkhorn_knopp.cuh"
 #include "../csrc/kernels/stream_ops.cuh"
+#include "../csrc/kernels/type_conversions.cuh"
 
 using namespace mhc;
 
@@ -136,6 +137,52 @@ std::tuple<torch::Tensor, torch::Tensor> stream_mix_bwd(torch::Tensor grad, torc
     return {d_inp, d_M};
 }
 
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+mhc_layer_fwd(torch::Tensor x_expanded, torch::Tensor rmsnorm_weight, torch::Tensor H_pre,
+              torch::Tensor H_post, torch::Tensor H_res, int sinkhorn_iters, float eps) {
+    CHECK_INPUT(x_expanded);
+    CHECK_INPUT(rmsnorm_weight);
+    CHECK_INPUT(H_pre);
+    CHECK_INPUT(H_post);
+    CHECK_INPUT(H_res);
+
+    int B = x_expanded.size(0), n = x_expanded.size(1), C = x_expanded.size(2);
+
+    auto x_f32 = x_expanded.to(torch::kFloat32).contiguous();
+    auto x_agg_bf16 = torch::empty({B, C}, x_expanded.options().dtype(torch::kBFloat16));
+    auto rms = torch::empty({B}, x_expanded.options().dtype(torch::kFloat32));
+    auto y_norm_bf16 = torch::empty({B, C}, x_expanded.options().dtype(torch::kBFloat16));
+    auto y_dist = torch::empty({B, n, C}, x_expanded.options().dtype(torch::kFloat32));
+    auto M = torch::empty({n, n}, x_expanded.options().dtype(torch::kFloat32));
+    auto output = torch::empty({B, n, C}, x_expanded.options().dtype(torch::kFloat32));
+    auto H_pre_activated = torch::empty({n}, x_expanded.options().dtype(torch::kFloat32));
+    auto H_post_activated = torch::empty({n}, x_expanded.options().dtype(torch::kFloat32));
+    auto H_res_exp = torch::empty({n, n}, x_expanded.options().dtype(torch::kFloat32));
+
+    stream_aggregate_bf16_fused_sigmoid(
+        reinterpret_cast<floatX*>(x_agg_bf16.data_ptr<at::BFloat16>()),
+        H_pre_activated.data_ptr<float>(), x_f32.data_ptr<float>(), H_pre.data_ptr<float>(), B, n,
+        C);
+
+    rmsnorm_forward_with_rms(
+        reinterpret_cast<floatX*>(y_norm_bf16.data_ptr<at::BFloat16>()), rms.data_ptr<float>(),
+        reinterpret_cast<const floatX*>(x_agg_bf16.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const floatX*>(rmsnorm_weight.data_ptr<at::BFloat16>()), B, C, eps);
+
+    stream_distribute_from_bf16_fused_sigmoid(
+        y_dist.data_ptr<float>(), H_post_activated.data_ptr<float>(),
+        reinterpret_cast<const floatX*>(y_norm_bf16.data_ptr<at::BFloat16>()),
+        H_post.data_ptr<float>(), B, n, C);
+
+    sinkhorn_knopp_forward_fused_exp(M.data_ptr<float>(), H_res_exp.data_ptr<float>(),
+                                     H_res.data_ptr<float>(), n, n, sinkhorn_iters, eps);
+
+    stream_mix_add(output.data_ptr<float>(), x_f32.data_ptr<float>(), y_dist.data_ptr<float>(),
+                   M.data_ptr<float>(), B, n, C);
+
+    return {output, rms, x_agg_bf16, H_pre_activated, H_post_activated, H_res_exp};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("sinkhorn_knopp_fwd", &sinkhorn_knopp_fwd);
     m.def("sinkhorn_knopp_bwd", &sinkhorn_knopp_bwd);
@@ -147,4 +194,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("stream_distribute_bwd", &stream_distribute_bwd);
     m.def("stream_mix_fwd", &stream_mix_fwd);
     m.def("stream_mix_bwd", &stream_mix_bwd);
+    m.def("mhc_layer_fwd", &mhc_layer_fwd);
 }
