@@ -3,6 +3,11 @@
 #include <cmath>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
+
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+
 #include "rmsnorm.cuh"
 #include "mhc_types.h"
 #include "utils.h"
@@ -75,6 +80,18 @@ int main() {
     }
 
     float max_diff = max_abs_diff(h_out_ref, h_out_gpu, N * C);
+
+#if DEBUG
+    printf("Sample outputs (first 10):\n");
+    printf("  GPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_out_gpu[i]);
+    printf("\n  CPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_out_ref[i]);
+    printf("\n\n");
+#endif
+
     check_test(max_diff, 1e-2f, "RMSNorm");
 
     cudaFree(d_inp);

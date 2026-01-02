@@ -4,6 +4,10 @@
 #include <cuda_runtime.h>
 #include <random>
 
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+
 #include "../include/mhc_types.h"
 #include "../include/utils.h"
 #include "../kernels/rmsnorm.cuh"
@@ -103,6 +107,26 @@ int main() {
 
     float d_inp_diff = max_abs_diff(h_d_inp_gpu, h_d_inp_cpu, N * C);
     float d_weight_diff = max_abs_diff(h_d_weight_gpu, h_d_weight_cpu, C);
+
+#if DEBUG
+    printf("\nSample d_inp (first 10):\n");
+    printf("  GPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_d_inp_gpu[i]);
+    printf("\n  CPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_d_inp_cpu[i]);
+    printf("\n");
+
+    printf("\nSample d_weight (first 10):\n");
+    printf("  GPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_d_weight_gpu[i]);
+    printf("\n  CPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.4f ", h_d_weight_cpu[i]);
+    printf("\n");
+#endif
 
     printf("\n");
     check_test(d_inp_diff, 0.02f, "d_inp");

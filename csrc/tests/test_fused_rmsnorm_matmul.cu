@@ -4,6 +4,10 @@
 #include <cuda_runtime.h>
 #include <random>
 
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+
 #include "../include/mhc_types.h"
 #include "../include/utils.h"
 #include "../kernels/fused_rmsnorm_matmul.cuh"
@@ -86,6 +90,7 @@ int main() {
     CHECK_CUDA(
         cudaMemcpy(h_rms_gpu, fused.get_rms_values(), M * sizeof(float), cudaMemcpyDeviceToHost));
 
+#if DEBUG
     printf("\nSample output (first 10):\n");
     printf("  GPU: ");
     for (int i = 0; i < 10; i++)
@@ -103,6 +108,7 @@ int main() {
     for (int i = 0; i < 5; i++)
         printf("%.4f ", h_rms_cpu[i]);
     printf("\n");
+#endif
 
     float out_diff = max_abs_diff(h_out_gpu, h_out_cpu, M * N);
     float rms_diff = max_abs_diff(h_rms_gpu, h_rms_cpu, M);

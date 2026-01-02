@@ -2,6 +2,11 @@
 #include <cstdlib>
 #include <cmath>
 #include <cuda_runtime.h>
+
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+
 #include "stream_ops.cuh"
 #include "mhc_types.h"
 #include "utils.h"
@@ -66,6 +71,7 @@ int main() {
 
     float max_diff = max_abs_diff(h_out_cpu, h_out_gpu, B * n * C);
 
+#if DEBUG
     printf("Sample outputs (first 10):\n");
     printf("  GPU: ");
     for (int i = 0; i < 10; i++)
@@ -74,6 +80,7 @@ int main() {
     for (int i = 0; i < 10; i++)
         printf("%.4f ", h_out_cpu[i]);
     printf("\n\n");
+#endif
 
     check_test(max_diff, 5e-3f, "Stream Mix TC (n=32, TF32)");
 

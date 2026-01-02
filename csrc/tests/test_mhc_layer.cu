@@ -3,6 +3,11 @@
 #include <cmath>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
+
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+
 #include "mhc_layer.cuh"
 #include "mhc_types.h"
 #include "utils.h"
@@ -168,6 +173,7 @@ int main() {
 
     printf("\nForward pass completed!\n");
 
+#if DEBUG
     printf("\nSample outputs (first 10 elements):\n");
     printf("  GPU: ");
     for (int i = 0; i < 10; i++) {
@@ -178,6 +184,7 @@ int main() {
         printf("%.4f ", h_out_ref[i]);
     }
     printf("\n");
+#endif
 
     float max_diff = max_abs_diff(h_out_ref, h_out_gpu, B * n * C);
 

@@ -2,6 +2,11 @@
 #include <cstdlib>
 #include <cmath>
 #include <cuda_runtime.h>
+
+#ifndef DEBUG
+#define DEBUG 0
+#endif
+
 #include "sinkhorn_knopp.cuh"
 #include "mhc_types.h"
 #include "utils.h"
@@ -103,6 +108,17 @@ int main() {
 
     printf("Sinkhorn-Knopp (M=%d, N=%d, iters=%d):\n", M, N, num_iters);
     printf("  CPU diff: %e, row err: %e, col err: %e\n", max_diff, row_err, col_err);
+
+#if DEBUG
+    printf("Sample outputs (first 10):\n");
+    printf("  GPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.6f ", h_out_gpu[i]);
+    printf("\n  CPU: ");
+    for (int i = 0; i < 10; i++)
+        printf("%.6f ", h_out_ref[i]);
+    printf("\n\n");
+#endif
 
     const float tolerance = 1e-5f;
     const float doubly_stochastic_tol = 1e-4f;
