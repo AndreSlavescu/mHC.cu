@@ -47,6 +47,10 @@ x = torch.randn(8, 4, 4096, device="cuda")  # [B, n, C]
 y = layer(x)  # [B, n, C]
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for directions on how to contribute, including testing, formatting, and code style requirements.
+
 ## Paper
 
 **mHC: Manifold-Constrained Hyper-Connections**  
