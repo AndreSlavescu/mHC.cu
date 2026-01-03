@@ -787,6 +787,7 @@ __global__ void reduce_partials_kernel(float* __restrict__ out, const float* __r
 
 inline void stream_aggregate_backward(float* d_inp, float* d_H_pre, const float* grad,
                                       const float* inp, const float* H_pre, int B, int n, int C,
+                                      float* workspace, int workspace_num_blocks,
                                       cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
     constexpr int MAX_N = 8;
@@ -796,14 +797,23 @@ inline void stream_aggregate_backward(float* d_inp, float* d_H_pre, const float*
     stream_aggregate_backward_dx_kernel<BLOCK_SIZE, MAX_N>
         <<<num_blocks_dx, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_pre, B, n, C);
 
+    stream_aggregate_backward_dH_partial_kernel<BLOCK_SIZE, MAX_N>
+        <<<workspace_num_blocks, BLOCK_SIZE, 0, stream>>>(workspace, grad, inp, B, n, C);
+
+    reduce_partials_kernel<MAX_N>
+        <<<n, 128, 0, stream>>>(d_H_pre, workspace, n, workspace_num_blocks);
+}
+
+inline void stream_aggregate_backward(float* d_inp, float* d_H_pre, const float* grad,
+                                      const float* inp, const float* H_pre, int B, int n, int C,
+                                      cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
     int num_blocks_dh = min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
     float* partials;
     CHECK_CUDA(cudaMallocAsync(&partials, num_blocks_dh * n * sizeof(float), stream));
 
-    stream_aggregate_backward_dH_partial_kernel<BLOCK_SIZE, MAX_N>
-        <<<num_blocks_dh, BLOCK_SIZE, 0, stream>>>(partials, grad, inp, B, n, C);
-
-    reduce_partials_kernel<MAX_N><<<n, 128, 0, stream>>>(d_H_pre, partials, n, num_blocks_dh);
+    stream_aggregate_backward(d_inp, d_H_pre, grad, inp, H_pre, B, n, C, partials, num_blocks_dh,
+                              stream);
 
     CHECK_CUDA(cudaFreeAsync(partials, stream));
 }
@@ -895,6 +905,7 @@ __global__ void stream_distribute_backward_dH_partial_kernel(float* __restrict__
 
 inline void stream_distribute_backward(float* d_inp, float* d_H_post, const float* grad,
                                        const float* inp, const float* H_post, int B, int n, int C,
+                                       float* workspace, int workspace_num_blocks,
                                        cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
     constexpr int MAX_N = 8;
@@ -904,14 +915,23 @@ inline void stream_distribute_backward(float* d_inp, float* d_H_post, const floa
     stream_distribute_backward_dx_kernel<BLOCK_SIZE, MAX_N>
         <<<num_blocks_dx, BLOCK_SIZE, 0, stream>>>(d_inp, grad, H_post, B, n, C);
 
+    stream_distribute_backward_dH_partial_kernel<BLOCK_SIZE, MAX_N>
+        <<<workspace_num_blocks, BLOCK_SIZE, 0, stream>>>(workspace, grad, inp, B, n, C);
+
+    reduce_partials_kernel<MAX_N>
+        <<<n, 128, 0, stream>>>(d_H_post, workspace, n, workspace_num_blocks);
+}
+
+inline void stream_distribute_backward(float* d_inp, float* d_H_post, const float* grad,
+                                       const float* inp, const float* H_post, int B, int n, int C,
+                                       cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
     int num_blocks_dh = min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
     float* partials;
     CHECK_CUDA(cudaMallocAsync(&partials, num_blocks_dh * n * sizeof(float), stream));
 
-    stream_distribute_backward_dH_partial_kernel<BLOCK_SIZE, MAX_N>
-        <<<num_blocks_dh, BLOCK_SIZE, 0, stream>>>(partials, grad, inp, B, n, C);
-
-    reduce_partials_kernel<MAX_N><<<n, 128, 0, stream>>>(d_H_post, partials, n, num_blocks_dh);
+    stream_distribute_backward(d_inp, d_H_post, grad, inp, H_post, B, n, C, partials, num_blocks_dh,
+                               stream);
 
     CHECK_CUDA(cudaFreeAsync(partials, stream));
 }
@@ -1048,8 +1068,8 @@ __global__ void reduce_partials_matrix_kernel(float* __restrict__ out,
 }
 
 inline void stream_mix_backward(float* d_inp, float* d_M, const float* grad, const float* inp,
-                                const float* M, int B, int n, int C,
-                                cudaStream_t stream = nullptr) {
+                                const float* M, int B, int n, int C, float* workspace,
+                                int workspace_num_blocks, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
     constexpr int MAX_N = 8;
 
@@ -1058,15 +1078,22 @@ inline void stream_mix_backward(float* d_inp, float* d_M, const float* grad, con
     stream_mix_backward_dx_kernel<BLOCK_SIZE, MAX_N>
         <<<num_blocks_dx, BLOCK_SIZE, 0, stream>>>(d_inp, grad, M, B, n, C);
 
+    stream_mix_backward_dM_partial_kernel<BLOCK_SIZE, MAX_N>
+        <<<workspace_num_blocks, BLOCK_SIZE, 0, stream>>>(workspace, grad, inp, B, n, C);
+
+    reduce_partials_matrix_kernel<MAX_N>
+        <<<n * n, 128, 0, stream>>>(d_M, workspace, n, workspace_num_blocks);
+}
+
+inline void stream_mix_backward(float* d_inp, float* d_M, const float* grad, const float* inp,
+                                const float* M, int B, int n, int C,
+                                cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
     int num_blocks_dm = min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
     float* partials;
     CHECK_CUDA(cudaMallocAsync(&partials, num_blocks_dm * n * n * sizeof(float), stream));
 
-    stream_mix_backward_dM_partial_kernel<BLOCK_SIZE, MAX_N>
-        <<<num_blocks_dm, BLOCK_SIZE, 0, stream>>>(partials, grad, inp, B, n, C);
-
-    reduce_partials_matrix_kernel<MAX_N>
-        <<<n * n, 128, 0, stream>>>(d_M, partials, n, num_blocks_dm);
+    stream_mix_backward(d_inp, d_M, grad, inp, M, B, n, C, partials, num_blocks_dm, stream);
 
     CHECK_CUDA(cudaFreeAsync(partials, stream));
 }

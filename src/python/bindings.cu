@@ -204,6 +204,13 @@ mhc_layer_bwd(torch::Tensor grad_output, torch::Tensor x_expanded, torch::Tensor
     int B = x_expanded.size(0), n = x_expanded.size(1), C = x_expanded.size(2);
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+    constexpr int BLOCK_SIZE = 256;
+    int workspace_num_blocks = std::min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
+    auto workspace_dH =
+        torch::empty({workspace_num_blocks * n}, grad_output.options().dtype(torch::kFloat32));
+    auto workspace_dM =
+        torch::empty({workspace_num_blocks * n * n}, grad_output.options().dtype(torch::kFloat32));
+
     auto grad_f32 = grad_output.to(torch::kFloat32).contiguous();
     auto x_f32 = x_expanded.to(torch::kFloat32).contiguous();
     auto y_norm_f32 = y_norm_bf16.to(torch::kFloat32).contiguous();
@@ -213,14 +220,15 @@ mhc_layer_bwd(torch::Tensor grad_output, torch::Tensor x_expanded, torch::Tensor
 
     stream_mix_backward(d_x_mix.data_ptr<float>(), d_M.data_ptr<float>(),
                         grad_f32.data_ptr<float>(), x_f32.data_ptr<float>(), M.data_ptr<float>(), B,
-                        n, C, stream);
+                        n, C, workspace_dM.data_ptr<float>(), workspace_num_blocks, stream);
 
     auto d_y_norm = torch::empty({B, C}, grad_output.options().dtype(torch::kFloat32));
     auto d_H_post_activated = torch::empty({n}, grad_output.options().dtype(torch::kFloat32));
 
     stream_distribute_backward(d_y_norm.data_ptr<float>(), d_H_post_activated.data_ptr<float>(),
                                grad_f32.data_ptr<float>(), y_norm_f32.data_ptr<float>(),
-                               H_post_activated.data_ptr<float>(), B, n, C, stream);
+                               H_post_activated.data_ptr<float>(), B, n, C,
+                               workspace_dH.data_ptr<float>(), workspace_num_blocks, stream);
 
     auto d_H_post = d_H_post_activated * H_post_activated * (1.0f - H_post_activated / 2.0f);
 
@@ -243,7 +251,8 @@ mhc_layer_bwd(torch::Tensor grad_output, torch::Tensor x_expanded, torch::Tensor
     auto d_H_pre_activated = torch::empty({n}, grad_output.options().dtype(torch::kFloat32));
     stream_aggregate_backward(d_x_from_agg.data_ptr<float>(), d_H_pre_activated.data_ptr<float>(),
                               d_x_agg.data_ptr<float>(), x_f32.data_ptr<float>(),
-                              H_pre_activated.data_ptr<float>(), B, n, C, stream);
+                              H_pre_activated.data_ptr<float>(), B, n, C,
+                              workspace_dH.data_ptr<float>(), workspace_num_blocks, stream);
 
     auto d_H_pre = d_H_pre_activated * H_pre_activated * (1.0f - H_pre_activated);
 

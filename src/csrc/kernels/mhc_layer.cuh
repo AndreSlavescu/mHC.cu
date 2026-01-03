@@ -149,9 +149,13 @@ struct MHCLayerGradients {
     float* d_H_post_activated;
     float* d_H_res_exp;
 
+    float* workspace_dH;
+    float* workspace_dM;
+    int workspace_num_blocks;
+
     bool initialized;
 
-    MHCLayerGradients() : initialized(false) {}
+    MHCLayerGradients() : initialized(false), workspace_dH(nullptr), workspace_dM(nullptr) {}
 
     void init(int B, int C, int n) {
         CHECK_CUDA(cudaMalloc(&d_x_expanded, B * n * C * sizeof(float)));
@@ -168,6 +172,11 @@ struct MHCLayerGradients {
         CHECK_CUDA(cudaMalloc(&d_H_pre_activated, n * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&d_H_post_activated, n * sizeof(float)));
         CHECK_CUDA(cudaMalloc(&d_H_res_exp, n * n * sizeof(float)));
+
+        constexpr int BLOCK_SIZE = 256;
+        workspace_num_blocks = min(128, (B * C + BLOCK_SIZE - 1) / BLOCK_SIZE);
+        CHECK_CUDA(cudaMalloc(&workspace_dH, workspace_num_blocks * n * sizeof(float)));
+        CHECK_CUDA(cudaMalloc(&workspace_dM, workspace_num_blocks * n * n * sizeof(float)));
 
         initialized = true;
     }
@@ -190,6 +199,9 @@ struct MHCLayerGradients {
         cudaFree(d_H_pre_activated);
         cudaFree(d_H_post_activated);
         cudaFree(d_H_res_exp);
+
+        cudaFree(workspace_dH);
+        cudaFree(workspace_dM);
 
         initialized = false;
     }
@@ -311,16 +323,20 @@ struct MHCLayer {
     StreamMixTC stream_mix_tc;
     bool use_tc_mix;
     bool backward_enabled;
+    bool use_pipelining;
 
     cudaStream_t stream;
+    cudaStream_t sinkhorn_stream;
+    cudaEvent_t sinkhorn_done;
     bool owns_stream;
     bool initialized;
 
     MHCLayer()
-        : stream(nullptr), owns_stream(false), initialized(false), use_tc_mix(false),
-          backward_enabled(false) {}
+        : stream(nullptr), sinkhorn_stream(nullptr), sinkhorn_done(nullptr), owns_stream(false),
+          initialized(false), use_tc_mix(false), backward_enabled(false), use_pipelining(true) {}
 
-    void init(const MHCLayerConfig& cfg, cudaStream_t s = nullptr, bool enable_backward = false) {
+    void init(const MHCLayerConfig& cfg, cudaStream_t s = nullptr, bool enable_backward = false,
+              bool enable_pipelining = true) {
         config = cfg;
         int B = cfg.batch_size;
         int C = cfg.hidden_dim;
@@ -328,6 +344,7 @@ struct MHCLayer {
 
         use_tc_mix = (n >= STREAM_MIX_TC_THRESHOLD);
         backward_enabled = enable_backward;
+        use_pipelining = enable_pipelining;
 
         weights.init(C, n);
         buffers.init(B, C, n, use_tc_mix || backward_enabled);
@@ -348,6 +365,11 @@ struct MHCLayer {
             owns_stream = false;
         }
 
+        if (use_pipelining) {
+            CHECK_CUDA(cudaStreamCreate(&sinkhorn_stream));
+            CHECK_CUDA(cudaEventCreate(&sinkhorn_done));
+        }
+
         initialized = true;
     }
 
@@ -363,6 +385,17 @@ struct MHCLayer {
 
         if (use_tc_mix) {
             stream_mix_tc.destroy();
+        }
+
+        if (use_pipelining) {
+            if (sinkhorn_stream) {
+                cudaStreamDestroy(sinkhorn_stream);
+                sinkhorn_stream = nullptr;
+            }
+            if (sinkhorn_done) {
+                cudaEventDestroy(sinkhorn_done);
+                sinkhorn_done = nullptr;
+            }
         }
 
         if (owns_stream && stream) {
@@ -396,6 +429,13 @@ struct MHCLayer {
         CHECK_CUDA(cudaMemcpyAsync(buffers.x_expanded, x_expanded, B * n * C * sizeof(float),
                                    cudaMemcpyHostToDevice, stream));
 
+        if (use_pipelining) {
+            sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res,
+                                             n, n, config.sinkhorn_iters, config.eps,
+                                             sinkhorn_stream);
+            CHECK_CUDA(cudaEventRecord(sinkhorn_done, sinkhorn_stream));
+        }
+
         stream_aggregate_bf16_fused_sigmoid(buffers.x_aggregated_bf16, buffers.H_pre_activated,
                                             buffers.x_expanded, weights.H_pre, B, n, C, stream);
 
@@ -407,8 +447,12 @@ struct MHCLayer {
                                                   buffers.layer_out_bf16, weights.H_post, B, n, C,
                                                   stream);
 
-        sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res, n, n,
-                                         config.sinkhorn_iters, config.eps, stream);
+        if (use_pipelining) {
+            CHECK_CUDA(cudaStreamWaitEvent(stream, sinkhorn_done, 0));
+        } else {
+            sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res,
+                                             n, n, config.sinkhorn_iters, config.eps, stream);
+        }
 
         if (use_tc_mix) {
             stream_mix_tc.forward(buffers.x_mixed, buffers.x_expanded, buffers.sinkhorn_M, stream);
@@ -427,6 +471,13 @@ struct MHCLayer {
         CHECK_CUDA(cudaMemcpyAsync(buffers.x_expanded, d_x_expanded, B * n * C * sizeof(float),
                                    cudaMemcpyDeviceToDevice, stream));
 
+        if (use_pipelining) {
+            sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res,
+                                             n, n, config.sinkhorn_iters, config.eps,
+                                             sinkhorn_stream);
+            CHECK_CUDA(cudaEventRecord(sinkhorn_done, sinkhorn_stream));
+        }
+
         stream_aggregate_bf16_fused_sigmoid(buffers.x_aggregated_bf16, buffers.H_pre_activated,
                                             buffers.x_expanded, weights.H_pre, B, n, C, stream);
 
@@ -438,8 +489,12 @@ struct MHCLayer {
                                                   buffers.layer_out_bf16, weights.H_post, B, n, C,
                                                   stream);
 
-        sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res, n, n,
-                                         config.sinkhorn_iters, config.eps, stream);
+        if (use_pipelining) {
+            CHECK_CUDA(cudaStreamWaitEvent(stream, sinkhorn_done, 0));
+        } else {
+            sinkhorn_knopp_forward_fused_exp(buffers.sinkhorn_M, buffers.H_res_exp, weights.H_res,
+                                             n, n, config.sinkhorn_iters, config.eps, stream);
+        }
 
         if (use_tc_mix) {
             stream_mix_tc.forward(buffers.x_mixed, buffers.x_expanded, buffers.sinkhorn_M, stream);
@@ -469,7 +524,8 @@ struct MHCLayer {
         grads.zero_weight_grads(C, n, stream);
 
         stream_mix_backward(grads.d_x_mixed, grads.d_M, d_output, buffers.x_expanded,
-                            buffers.sinkhorn_M, B, n, C, stream);
+                            buffers.sinkhorn_M, B, n, C, grads.workspace_dM,
+                            grads.workspace_num_blocks, stream);
 
         CHECK_CUDA(cudaMemcpyAsync(grads.d_y_distributed, d_output, B * n * C * sizeof(float),
                                    cudaMemcpyDeviceToDevice, stream));
@@ -483,7 +539,8 @@ struct MHCLayer {
 
         stream_distribute_backward(grads.d_layer_out, grads.d_H_post_activated,
                                    grads.d_y_distributed, buffers.layer_out_f32,
-                                   buffers.H_post_activated, B, n, C, stream);
+                                   buffers.H_post_activated, B, n, C, grads.workspace_dH,
+                                   grads.workspace_num_blocks, stream);
 
         sigmoid_scale_backward(grads.d_H_post, grads.d_H_post_activated, buffers.H_post_activated,
                                2.0f, n, stream);
@@ -495,7 +552,8 @@ struct MHCLayer {
                          C, stream);
 
         stream_aggregate_backward(grads.d_x_expanded, grads.d_H_pre_activated, grads.d_x_aggregated,
-                                  buffers.x_expanded, buffers.H_pre_activated, B, n, C, stream);
+                                  buffers.x_expanded, buffers.H_pre_activated, B, n, C,
+                                  grads.workspace_dH, grads.workspace_num_blocks, stream);
 
         sigmoid_backward(grads.d_H_pre, grads.d_H_pre_activated, buffers.H_pre_activated, n,
                          stream);
