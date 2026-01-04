@@ -85,3 +85,24 @@ lint:
 		--language=c++ \
 		-I src/csrc/include \
 		-I src/csrc/kernels
+	@echo ""
+	@echo "checking for unused functions..."
+	@unused=$$(find src/csrc src/python \( -name "*.cu" -o -name "*.cuh" -o -name "*.h" -o -name "*.cpp" \) -not -path "*/build/*" | \
+		xargs cppcheck --enable=unusedFunction \
+		--suppress=missingIncludeSystem \
+		--suppress=unmatchedSuppression \
+		--suppress=syntaxError \
+		--inline-suppr \
+		--language=c++ \
+		-I src/csrc/include \
+		-I src/csrc/kernels 2>&1 | \
+		grep -E "unusedFunction" | \
+		grep -v "_kernel"); \
+	if [ -n "$$unused" ]; then \
+		echo "$$unused"; \
+		echo ""; \
+		echo "ERROR: Unused functions found. Please remove them or mark with // cppcheck-suppress unusedFunction"; \
+		exit 1; \
+	else \
+		echo "No unused functions found."; \
+	fi

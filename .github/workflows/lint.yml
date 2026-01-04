@@ -46,3 +46,24 @@ jobs:
             --language=c++ \
             -I src/csrc/include \
             -I src/csrc/kernels
+
+      - name: Check for unused functions
+        run: |
+          unused=$(find src/csrc src/python \( -name "*.cu" -o -name "*.cuh" -o -name "*.h" -o -name "*.cpp" \) -not -path "*/build/*" | \
+            xargs cppcheck --enable=unusedFunction \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            --suppress=syntaxError \
+            --inline-suppr \
+            --language=c++ \
+            -I src/csrc/include \
+            -I src/csrc/kernels 2>&1 | \
+            grep -E "unusedFunction" | \
+            grep -v "_kernel" || true)
+          if [ -n "$unused" ]; then
+            echo "$unused"
+            echo ""
+            echo "ERROR: Unused functions found. Remove them or suppress with // cppcheck-suppress unusedFunction"
+            exit 1
+          fi
+          echo "No unused functions found."

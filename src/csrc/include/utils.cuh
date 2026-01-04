@@ -165,14 +165,6 @@ inline float max_abs_diff(const float* a, const float* b, int n) {
     return max_diff;
 }
 
-inline float mean_abs_diff(const float* a, const float* b, int n) {
-    float sum = 0.0f;
-    for (int i = 0; i < n; i++) {
-        sum += fabsf(a[i] - b[i]);
-    }
-    return sum / n;
-}
-
 inline bool check_test(float max_diff, float tolerance, const char* test_name = nullptr) {
     if (test_name) {
         printf("%s: ", test_name);

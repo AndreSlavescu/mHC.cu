@@ -338,19 +338,6 @@ __global__ void exp_backward_kernel(float* __restrict__ d_inp, const float* __re
     }
 }
 
-inline void apply_sigmoid(float* out, const float* inp, int size, cudaStream_t stream = nullptr) {
-    constexpr int BLOCK_SIZE = 256;
-    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    sigmoid_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, size);
-}
-
-inline void apply_sigmoid_scale(float* out, const float* inp, float scale, int size,
-                                cudaStream_t stream = nullptr) {
-    constexpr int BLOCK_SIZE = 256;
-    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    sigmoid_scale_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, scale, size);
-}
-
 inline void apply_exp(float* out, const float* inp, int size, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
     int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -700,8 +687,6 @@ struct MHCLayer {
 
     float* get_rms_values() { return buffers.rms_values; }
 
-    MHCLayerGradients& get_gradients() { return grads; }
-
     void backward(const float* d_output) {
         if (!backward_enabled) {
             fprintf(stderr, "MHCLayer::backward called but backward not enabled\n");
@@ -742,8 +727,6 @@ struct MHCLayer {
         sigmoid_backward(grads.d_H_pre, grads.d_H_pre_activated, buffers.H_pre_activated, n,
                          stream);
     }
-
-    float* get_dx() { return grads.d_x_expanded; }
 
     void sync() { CHECK_CUDA(cudaStreamSynchronize(stream)); }
 };

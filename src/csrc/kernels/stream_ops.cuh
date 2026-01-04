@@ -216,29 +216,6 @@ __global__ void stream_distribute_mix_add_fused_vec4_kernel(
     *out_vec = result;
 }
 
-template<int BLOCK_SIZE>
-__global__ void stream_mix_large_kernel(float* __restrict__ out, const float* __restrict__ inp,
-                                        const float* __restrict__ M, int B, int n, int C) {
-    extern __shared__ float s_M_dyn[];
-    for (int i = threadIdx.x; i < n * n; i += BLOCK_SIZE)
-        s_M_dyn[i] = M[i];
-    __syncthreads();
-
-    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
-    if (idx >= B * n * C)
-        return;
-
-    int b = idx / (n * C);
-    int remainder = idx % (n * C);
-    int i = remainder / C;
-    int c = remainder % C;
-
-    float sum = 0.0f;
-    for (int j = 0; j < n; j++)
-        sum += s_M_dyn[i * n + j] * inp[b * n * C + j * C + c];
-    out[idx] = sum;
-}
-
 template<int BLOCK_SIZE, int MAX_N>
 __global__ void
 distribute_add_fused_kernel(float* __restrict__ out, float* __restrict__ H_post_activated,
@@ -352,12 +329,6 @@ class StreamMixTC {
     }
 };
 
-inline void stream_add(float* out, const float* a, const float* b, int size,
-                       cudaStream_t stream = nullptr) {
-    constexpr int BLOCK = 256;
-    stream_add_kernel<BLOCK><<<(size + BLOCK - 1) / BLOCK, BLOCK, 0, stream>>>(out, a, b, size);
-}
-
 inline void stream_aggregate_bf16_fused_sigmoid(floatX* out, float* H_pre_activated,
                                                 const float* inp, const float* H_pre_raw, int B,
                                                 int n, int C, cudaStream_t stream = nullptr) {
@@ -435,49 +406,6 @@ inline void stream_aggregate_bf16_fused_sigmoid(floatX* out, float* H_pre_activa
     }
 }
 
-inline void stream_distribute_from_bf16_fused_sigmoid(float* out, float* H_post_activated,
-                                                      const floatX* inp, const float* H_post_raw,
-                                                      int B, int n, int C,
-                                                      cudaStream_t stream = nullptr) {
-    constexpr int BLOCK = 256;
-    int blocks = (B * n * C + BLOCK - 1) / BLOCK;
-
-#ifdef MHC_ENABLE_PDL
-    cudaLaunchAttribute attrs[1];
-    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-    attrs[0].val.programmaticStreamSerializationAllowed = 1;
-    cudaLaunchConfig_t config = {};
-    config.numAttrs = 1;
-    config.attrs = attrs;
-    config.blockDim = {BLOCK, 1, 1};
-    config.gridDim = {(unsigned int)blocks, 1, 1};
-    config.dynamicSmemBytes = 0;
-    config.stream = stream;
-
-#define DISPATCH_DISTRIBUTE_FUSED(MAX_N_VAL)                                                       \
-    cudaLaunchKernelEx(&config,                                                                    \
-                       stream_distribute_from_bf16_fused_sigmoid_kernel<BLOCK, MAX_N_VAL>, out,    \
-                       H_post_activated, inp, H_post_raw, B, n, C)
-#else
-#define DISPATCH_DISTRIBUTE_FUSED(MAX_N_VAL)                                                       \
-    stream_distribute_from_bf16_fused_sigmoid_kernel<BLOCK, MAX_N_VAL>                             \
-        <<<blocks, BLOCK, 0, stream>>>(out, H_post_activated, inp, H_post_raw, B, n, C)
-#endif
-
-    if (n <= 4) {
-        DISPATCH_DISTRIBUTE_FUSED(4);
-    } else if (n <= 8) {
-        DISPATCH_DISTRIBUTE_FUSED(8);
-    } else if (n <= 16) {
-        DISPATCH_DISTRIBUTE_FUSED(16);
-    } else if (n <= 32) {
-        DISPATCH_DISTRIBUTE_FUSED(32);
-    } else {
-        fprintf(stderr, "stream_distribute_from_bf16_fused_sigmoid: n > 32 not implemented\n");
-    }
-#undef DISPATCH_DISTRIBUTE_FUSED
-}
-
 inline void stream_distribute_mix_add_fused(float* out, float* H_post_activated, const float* x_inp,
                                             const floatX* y_norm, const float* H_post_raw,
                                             const float* M, int B, int n, int C,
@@ -518,14 +446,6 @@ inline void stream_distribute_mix_add_fused(float* out, float* H_post_activated,
         fprintf(stderr, "stream_distribute_mix_add_fused: n > 32 not implemented\n");
     }
 #undef DISPATCH_MIX_ADD_FUSED
-}
-
-inline void stream_mix_large(float* out, const float* inp, const float* M, int B, int n, int C,
-                             cudaStream_t stream = nullptr) {
-    constexpr int BLOCK = 256;
-    int blocks = (B * n * C + BLOCK - 1) / BLOCK;
-    size_t smem = n * n * sizeof(float);
-    stream_mix_large_kernel<BLOCK><<<blocks, BLOCK, smem, stream>>>(out, inp, M, B, n, C);
 }
 
 template<int BLOCK_SIZE, int MAX_N>
