@@ -31,94 +31,6 @@ def test_sinkhorn_knopp_gradient():
     assert not torch.isinf(inp.grad).any()
 
 
-def test_stream_aggregate():
-    from mhc import stream_aggregate
-
-    B, n, C = 8, 4, 128
-    inp = torch.randn(B, n, C, device="cuda")
-    H_pre = torch.ones(n, device="cuda") / n
-
-    out = stream_aggregate(inp, H_pre)
-    expected = (inp * H_pre.view(1, n, 1)).sum(dim=1)
-
-    assert out.shape == (B, C)
-    assert torch.allclose(out, expected, atol=1e-5)
-
-
-def test_stream_aggregate_gradient():
-    from mhc import stream_aggregate
-
-    B, n, C = 8, 4, 128
-    inp = (torch.randn(B, n, C, device="cuda") + 0.1).requires_grad_(True)
-    H_pre = torch.randn(n, device="cuda", requires_grad=True)
-
-    out = stream_aggregate(inp, H_pre)
-    loss = out.sum()
-    loss.backward()
-
-    assert inp.grad is not None
-    assert H_pre.grad is not None
-    assert not torch.isnan(inp.grad).any()
-    assert not torch.isnan(H_pre.grad).any()
-
-
-def test_stream_distribute():
-    from mhc import stream_distribute
-
-    B, n, C = 8, 4, 128
-    inp = torch.randn(B, C, device="cuda")
-    H_post = torch.ones(n, device="cuda")
-
-    out = stream_distribute(inp, H_post)
-    expected = inp.unsqueeze(1) * H_post.view(1, n, 1)
-
-    assert out.shape == (B, n, C)
-    assert torch.allclose(out, expected, atol=1e-5)
-
-
-def test_stream_distribute_gradient():
-    from mhc import stream_distribute
-
-    B, n, C = 8, 4, 128
-    inp = (torch.randn(B, C, device="cuda") + 0.1).requires_grad_(True)
-    H_post = torch.randn(n, device="cuda", requires_grad=True)
-
-    out = stream_distribute(inp, H_post)
-    loss = out.sum()
-    loss.backward()
-
-    assert inp.grad is not None
-    assert H_post.grad is not None
-
-
-def test_stream_mix():
-    from mhc import stream_mix
-
-    B, n, C = 8, 4, 128
-    inp = torch.randn(B, n, C, device="cuda")
-    M = torch.eye(n, device="cuda")
-
-    out = stream_mix(inp, M)
-
-    assert out.shape == (B, n, C)
-    assert torch.allclose(out, inp, atol=1e-5)
-
-
-def test_stream_mix_gradient():
-    from mhc import stream_mix
-
-    B, n, C = 8, 4, 128
-    inp = (torch.randn(B, n, C, device="cuda") + 0.1).requires_grad_(True)
-    M = torch.randn(n, n, device="cuda", requires_grad=True)
-
-    out = stream_mix(inp, M)
-    loss = out.sum()
-    loss.backward()
-
-    assert inp.grad is not None
-    assert M.grad is not None
-
-
 def test_rmsnorm():
     from mhc import rmsnorm
 
@@ -148,28 +60,10 @@ def test_rmsnorm_gradient():
 
 
 def test_numerical_stability_large_values():
-    from mhc import sinkhorn_knopp, stream_aggregate, stream_distribute, stream_mix
+    from mhc import sinkhorn_knopp
 
     inp = torch.rand(32, 32, device="cuda") * 1000
     out = sinkhorn_knopp(inp, num_iters=50)
-    assert not torch.isnan(out).any()
-    assert not torch.isinf(out).any()
-
-    B, n, C = 8, 4, 128
-    x = torch.randn(B, n, C, device="cuda") * 100
-    H = torch.randn(n, device="cuda")
-
-    out = stream_aggregate(x, H)
-    assert not torch.isnan(out).any()
-    assert not torch.isinf(out).any()
-
-    y = torch.randn(B, C, device="cuda") * 100
-    out = stream_distribute(y, H)
-    assert not torch.isnan(out).any()
-    assert not torch.isinf(out).any()
-
-    M = torch.randn(n, n, device="cuda") * 10
-    out = stream_mix(x, M)
     assert not torch.isnan(out).any()
     assert not torch.isinf(out).any()
 

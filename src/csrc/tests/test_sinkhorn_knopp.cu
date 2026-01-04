@@ -9,7 +9,7 @@
 
 #include "sinkhorn_knopp.cuh"
 #include "mhc_types.h"
-#include "utils.h"
+#include "utils.cuh"
 
 using namespace mhc;
 
@@ -44,6 +44,15 @@ void sinkhorn_knopp_cpu_reference(float* out, const float* inp, int M, int N, in
             }
         }
     }
+}
+
+void sinkhorn_knopp_fused_exp_cpu_reference(float* out, float* H_res_exp, const float* H_res_raw,
+                                            int M, int N, int num_iters, float eps) {
+    for (int i = 0; i < M * N; i++) {
+        H_res_exp[i] = expf(H_res_raw[i]);
+        out[i] = H_res_exp[i];
+    }
+    sinkhorn_knopp_cpu_reference(out, out, M, N, num_iters, eps);
 }
 
 float check_row_sums(const float* mat, int M, int N) {
@@ -162,6 +171,212 @@ int main() {
     free(h_out_gpu);
     free(h_inp2);
     free(h_out2);
+
+    printf("\nTesting fused_exp version...\n");
+    const int M3 = 4, N3 = 4;
+    float* h_H_res_raw = (float*)malloc(M3 * N3 * sizeof(float));
+    float* h_H_res_exp_cpu = (float*)malloc(M3 * N3 * sizeof(float));
+    float* h_out_cpu = (float*)malloc(M3 * N3 * sizeof(float));
+    float* h_H_res_exp_gpu = (float*)malloc(M3 * N3 * sizeof(float));
+    float* h_out_gpu3 = (float*)malloc(M3 * N3 * sizeof(float));
+
+    for (int i = 0; i < M3 * N3; i++) {
+        h_H_res_raw[i] = ((float)rand() / RAND_MAX - 0.5f) * 2.0f;
+    }
+
+    sinkhorn_knopp_fused_exp_cpu_reference(h_out_cpu, h_H_res_exp_cpu, h_H_res_raw, M3, N3,
+                                           num_iters, eps);
+
+    float *d_H_res_raw, *d_H_res_exp, *d_out3;
+    CHECK_CUDA(cudaMalloc(&d_H_res_raw, M3 * N3 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_H_res_exp, M3 * N3 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_out3, M3 * N3 * sizeof(float)));
+    CHECK_CUDA(
+        cudaMemcpy(d_H_res_raw, h_H_res_raw, M3 * N3 * sizeof(float), cudaMemcpyHostToDevice));
+
+    sinkhorn_knopp_forward_fused_exp(d_out3, d_H_res_exp, d_H_res_raw, M3, N3, num_iters, eps);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaMemcpy(h_out_gpu3, d_out3, M3 * N3 * sizeof(float), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(
+        cudaMemcpy(h_H_res_exp_gpu, d_H_res_exp, M3 * N3 * sizeof(float), cudaMemcpyDeviceToHost));
+
+    float exp_diff = max_abs_diff(h_H_res_exp_cpu, h_H_res_exp_gpu, M3 * N3);
+    float out_diff = max_abs_diff(h_out_cpu, h_out_gpu3, M3 * N3);
+    float row_err3 = check_row_sums(h_out_gpu3, M3, N3);
+    float col_err3 = check_col_sums(h_out_gpu3, M3, N3);
+
+    printf("  exp diff: %e, out diff: %e, row err: %e, col err: %e\n", exp_diff, out_diff, row_err3,
+           col_err3);
+    bool passed3 = (exp_diff < 1e-5f && out_diff < 1e-5f && row_err3 < doubly_stochastic_tol &&
+                    col_err3 < doubly_stochastic_tol);
+    check_test(passed3 ? 0.0f : 1.0f, 0.5f, "fused_exp 4x4");
+
+    cudaFree(d_H_res_raw);
+    cudaFree(d_H_res_exp);
+    cudaFree(d_out3);
+    free(h_H_res_raw);
+    free(h_H_res_exp_cpu);
+    free(h_out_cpu);
+    free(h_H_res_exp_gpu);
+    free(h_out_gpu3);
+
+    printf("\nTesting batched sinkhorn (n=4, B=64)...\n");
+    const int B_batch = 64, n_batch = 4;
+    float* h_inp_batch = (float*)malloc(B_batch * n_batch * n_batch * sizeof(float));
+    float* h_out_batch_cpu = (float*)malloc(B_batch * n_batch * n_batch * sizeof(float));
+    float* h_out_batch_gpu = (float*)malloc(B_batch * n_batch * n_batch * sizeof(float));
+
+    for (int i = 0; i < B_batch * n_batch * n_batch; i++) {
+        h_inp_batch[i] = (float)rand() / RAND_MAX + 0.1f;
+    }
+
+    for (int b = 0; b < B_batch; b++) {
+        sinkhorn_knopp_cpu_reference(h_out_batch_cpu + b * n_batch * n_batch,
+                                     h_inp_batch + b * n_batch * n_batch, n_batch, n_batch,
+                                     num_iters, eps);
+    }
+
+    float *d_inp_batch, *d_out_batch;
+    CHECK_CUDA(cudaMalloc(&d_inp_batch, B_batch * n_batch * n_batch * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_out_batch, B_batch * n_batch * n_batch * sizeof(float)));
+    CHECK_CUDA(cudaMemcpy(d_inp_batch, h_inp_batch, B_batch * n_batch * n_batch * sizeof(float),
+                          cudaMemcpyHostToDevice));
+
+    sinkhorn_knopp_forward_batched(d_out_batch, d_inp_batch, B_batch, n_batch, num_iters, eps);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaMemcpy(h_out_batch_gpu, d_out_batch, B_batch * n_batch * n_batch * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    float batch_diff = max_abs_diff(h_out_batch_cpu, h_out_batch_gpu, B_batch * n_batch * n_batch);
+
+    float max_row_err_batch = 0.0f, max_col_err_batch = 0.0f;
+    for (int b = 0; b < B_batch; b++) {
+        float re = check_row_sums(h_out_batch_gpu + b * n_batch * n_batch, n_batch, n_batch);
+        float ce = check_col_sums(h_out_batch_gpu + b * n_batch * n_batch, n_batch, n_batch);
+        if (re > max_row_err_batch)
+            max_row_err_batch = re;
+        if (ce > max_col_err_batch)
+            max_col_err_batch = ce;
+    }
+
+    printf("  CPU diff: %e, row err: %e, col err: %e\n", batch_diff, max_row_err_batch,
+           max_col_err_batch);
+    bool passed_batch = (batch_diff < 1e-5f && max_row_err_batch < doubly_stochastic_tol &&
+                         max_col_err_batch < doubly_stochastic_tol);
+    check_test(passed_batch ? 0.0f : 1.0f, 0.5f, "batched 4x4 B=64");
+
+    cudaFree(d_inp_batch);
+    cudaFree(d_out_batch);
+    free(h_inp_batch);
+    free(h_out_batch_cpu);
+    free(h_out_batch_gpu);
+
+    printf("\nTesting batched sinkhorn (n=8, B=32)...\n");
+    const int B_batch2 = 32, n_batch2 = 8;
+    float* h_inp_batch2 = (float*)malloc(B_batch2 * n_batch2 * n_batch2 * sizeof(float));
+    float* h_out_batch2_cpu = (float*)malloc(B_batch2 * n_batch2 * n_batch2 * sizeof(float));
+    float* h_out_batch2_gpu = (float*)malloc(B_batch2 * n_batch2 * n_batch2 * sizeof(float));
+
+    for (int i = 0; i < B_batch2 * n_batch2 * n_batch2; i++) {
+        h_inp_batch2[i] = (float)rand() / RAND_MAX + 0.1f;
+    }
+
+    for (int b = 0; b < B_batch2; b++) {
+        sinkhorn_knopp_cpu_reference(h_out_batch2_cpu + b * n_batch2 * n_batch2,
+                                     h_inp_batch2 + b * n_batch2 * n_batch2, n_batch2, n_batch2,
+                                     num_iters, eps);
+    }
+
+    float *d_inp_batch2, *d_out_batch2;
+    CHECK_CUDA(cudaMalloc(&d_inp_batch2, B_batch2 * n_batch2 * n_batch2 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_out_batch2, B_batch2 * n_batch2 * n_batch2 * sizeof(float)));
+    CHECK_CUDA(cudaMemcpy(d_inp_batch2, h_inp_batch2,
+                          B_batch2 * n_batch2 * n_batch2 * sizeof(float), cudaMemcpyHostToDevice));
+
+    sinkhorn_knopp_forward_batched(d_out_batch2, d_inp_batch2, B_batch2, n_batch2, num_iters, eps);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaMemcpy(h_out_batch2_gpu, d_out_batch2,
+                          B_batch2 * n_batch2 * n_batch2 * sizeof(float), cudaMemcpyDeviceToHost));
+
+    float batch2_diff =
+        max_abs_diff(h_out_batch2_cpu, h_out_batch2_gpu, B_batch2 * n_batch2 * n_batch2);
+
+    float max_row_err_batch2 = 0.0f, max_col_err_batch2 = 0.0f;
+    for (int b = 0; b < B_batch2; b++) {
+        float re = check_row_sums(h_out_batch2_gpu + b * n_batch2 * n_batch2, n_batch2, n_batch2);
+        float ce = check_col_sums(h_out_batch2_gpu + b * n_batch2 * n_batch2, n_batch2, n_batch2);
+        if (re > max_row_err_batch2)
+            max_row_err_batch2 = re;
+        if (ce > max_col_err_batch2)
+            max_col_err_batch2 = ce;
+    }
+
+    printf("  CPU diff: %e, row err: %e, col err: %e\n", batch2_diff, max_row_err_batch2,
+           max_col_err_batch2);
+    bool passed_batch2 = (batch2_diff < 1e-5f && max_row_err_batch2 < doubly_stochastic_tol &&
+                          max_col_err_batch2 < doubly_stochastic_tol);
+    check_test(passed_batch2 ? 0.0f : 1.0f, 0.5f, "batched 8x8 B=32");
+
+    cudaFree(d_inp_batch2);
+    cudaFree(d_out_batch2);
+    free(h_inp_batch2);
+    free(h_out_batch2_cpu);
+    free(h_out_batch2_gpu);
+
+    printf("\nTesting large batch sinkhorn (n=4, B=320)...\n");
+    const int B_large = 320, n_large = 4;
+    float* h_inp_large = (float*)malloc(B_large * n_large * n_large * sizeof(float));
+    float* h_out_large_cpu = (float*)malloc(B_large * n_large * n_large * sizeof(float));
+    float* h_out_large_gpu = (float*)malloc(B_large * n_large * n_large * sizeof(float));
+
+    for (int i = 0; i < B_large * n_large * n_large; i++) {
+        h_inp_large[i] = (float)rand() / RAND_MAX + 0.1f;
+    }
+
+    for (int b = 0; b < B_large; b++) {
+        sinkhorn_knopp_cpu_reference(h_out_large_cpu + b * n_large * n_large,
+                                     h_inp_large + b * n_large * n_large, n_large, n_large,
+                                     num_iters, eps);
+    }
+
+    float *d_inp_large, *d_out_large;
+    CHECK_CUDA(cudaMalloc(&d_inp_large, B_large * n_large * n_large * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&d_out_large, B_large * n_large * n_large * sizeof(float)));
+    CHECK_CUDA(cudaMemcpy(d_inp_large, h_inp_large, B_large * n_large * n_large * sizeof(float),
+                          cudaMemcpyHostToDevice));
+
+    sinkhorn_knopp_forward_batched(d_out_large, d_inp_large, B_large, n_large, num_iters, eps);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    CHECK_CUDA(cudaMemcpy(h_out_large_gpu, d_out_large, B_large * n_large * n_large * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+
+    float large_diff = max_abs_diff(h_out_large_cpu, h_out_large_gpu, B_large * n_large * n_large);
+
+    float max_row_err_large = 0.0f, max_col_err_large = 0.0f;
+    for (int b = 0; b < B_large; b++) {
+        float re = check_row_sums(h_out_large_gpu + b * n_large * n_large, n_large, n_large);
+        float ce = check_col_sums(h_out_large_gpu + b * n_large * n_large, n_large, n_large);
+        if (re > max_row_err_large)
+            max_row_err_large = re;
+        if (ce > max_col_err_large)
+            max_col_err_large = ce;
+    }
+
+    printf("  CPU diff: %e, row err: %e, col err: %e\n", large_diff, max_row_err_large,
+           max_col_err_large);
+    bool passed_large = (large_diff < 1e-5f && max_row_err_large < doubly_stochastic_tol &&
+                         max_col_err_large < doubly_stochastic_tol);
+    check_test(passed_large ? 0.0f : 1.0f, 0.5f, "batched 4x4 B=320");
+
+    cudaFree(d_inp_large);
+    cudaFree(d_out_large);
+    free(h_inp_large);
+    free(h_out_large_cpu);
+    free(h_out_large_gpu);
 
     return 0;
 }

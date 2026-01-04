@@ -4,7 +4,7 @@
 #include <cuda_bf16.h>
 #include "mhc_layer.cuh"
 #include "mhc_types.h"
-#include "utils.h"
+#include "utils.cuh"
 
 using namespace mhc;
 

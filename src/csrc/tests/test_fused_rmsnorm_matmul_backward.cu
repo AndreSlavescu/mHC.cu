@@ -9,7 +9,7 @@
 #endif
 
 #include "../include/mhc_types.h"
-#include "../include/utils.h"
+#include "../include/utils.cuh"
 #include "../kernels/fused_rmsnorm_matmul.cuh"
 
 using namespace mhc;

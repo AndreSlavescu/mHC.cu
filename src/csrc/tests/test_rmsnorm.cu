@@ -10,7 +10,7 @@
 
 #include "rmsnorm.cuh"
 #include "mhc_types.h"
-#include "utils.h"
+#include "utils.cuh"
 
 using namespace mhc;
 

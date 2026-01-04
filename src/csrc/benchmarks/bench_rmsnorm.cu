@@ -6,7 +6,7 @@
 #include <cuda_runtime.h>
 
 #include "../include/mhc_types.h"
-#include "../include/utils.h"
+#include "../include/utils.cuh"
 
 namespace cg = cooperative_groups;
 using namespace mhc;

@@ -26,15 +26,13 @@ endfunction()
 
 set(TESTS
     test_rmsnorm
+    test_rmsnorm_backward
     test_sinkhorn_knopp
     test_mhc_layer
-    test_stream_mix_tc
+    test_stream_ops
+    test_stream_ops_backward
     test_fused_rmsnorm_matmul
     test_fused_rmsnorm_matmul_backward
-    test_stream_aggregate_backward
-    test_stream_distribute_backward
-    test_stream_mix_backward
-    test_rmsnorm_backward
 )
 
 set(BENCHMARKS

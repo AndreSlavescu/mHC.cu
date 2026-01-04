@@ -71,6 +71,80 @@ class NaiveMHCLayer(nn.Module):
         return x_mixed + y_dist
 
 
+class NaiveMHCLayerDynamic(nn.Module):
+    """
+    Dynamic H computation as per the paper (Equations: 5-10):
+    1. Flatten x -> RMSNorm -> Linear projections to get tilde_H values
+    2. H_pre = sigmoid(tilde_H_pre), H_post = 2*sigmoid(tilde_H_post)
+    3. M = Sinkhorn-Knopp(tilde_H_res)
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        expansion_rate: int = 4,
+        sinkhorn_iters: int = 20,
+        eps: float = 1e-5,
+        alpha_init: float = 0.01,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.expansion_rate = expansion_rate
+        self.sinkhorn_iters = sinkhorn_iters
+        self.eps = eps
+        n = expansion_rate
+        C = hidden_dim
+
+        self.rmsnorm_weight = nn.Parameter(torch.ones(hidden_dim, dtype=torch.float32))
+
+        self.phi_pre = nn.Parameter(torch.randn(n * C, n) * 0.02)
+        self.phi_post = nn.Parameter(torch.randn(n * C, n) * 0.02)
+        self.phi_res = nn.Parameter(torch.randn(n * C, n * n) * 0.02)
+
+        self.b_pre = nn.Parameter(torch.zeros(n))
+        self.b_post = nn.Parameter(torch.zeros(n))
+        self.b_res = nn.Parameter(torch.zeros(n, n))
+
+        self.alpha_pre = nn.Parameter(torch.tensor(alpha_init))
+        self.alpha_post = nn.Parameter(torch.tensor(alpha_init))
+        self.alpha_res = nn.Parameter(torch.tensor(alpha_init))
+
+    def sinkhorn_knopp(self, M: torch.Tensor) -> torch.Tensor:
+        M = torch.exp(M)
+        for _ in range(self.sinkhorn_iters):
+            M = M / (M.sum(dim=-1, keepdim=True) + self.eps)
+            M = M / (M.sum(dim=-2, keepdim=True) + self.eps)
+        return M
+
+    def rmsnorm(self, x: torch.Tensor) -> torch.Tensor:
+        rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + self.eps)
+        return x / rms * self.rmsnorm_weight
+
+    def forward(self, x_expanded: torch.Tensor) -> torch.Tensor:
+        B, n, C = x_expanded.shape
+
+        x_flat = x_expanded.reshape(B, n * C)
+        rms = torch.sqrt(torch.mean(x_flat * x_flat, dim=-1, keepdim=True) + self.eps)
+        x_norm = x_flat / rms
+
+        tilde_H_pre = self.alpha_pre * (x_norm @ self.phi_pre) + self.b_pre
+        tilde_H_post = self.alpha_post * (x_norm @ self.phi_post) + self.b_post
+        tilde_H_res = (
+            self.alpha_res * (x_norm @ self.phi_res).reshape(B, n, n) + self.b_res
+        )
+
+        H_pre = torch.sigmoid(tilde_H_pre)
+        H_post = 2.0 * torch.sigmoid(tilde_H_post)
+        M = self.sinkhorn_knopp(tilde_H_res)
+
+        x_agg = torch.einsum("bi,bic->bc", H_pre, x_expanded)
+        x_normed = self.rmsnorm(x_agg)
+        y_dist = H_post.unsqueeze(-1) * x_normed.unsqueeze(1)
+        x_mixed = torch.einsum("bij,bjc->bic", M, x_expanded)
+
+        return x_mixed + y_dist
+
+
 def benchmark_forward(layer, B, n, C, device, cleaner, warmup=10, runs=100):
     for _ in range(warmup):
         x = torch.randn(B, n, C, device=device, dtype=torch.float32)
@@ -184,8 +258,6 @@ def main():
     from mhc import MHCLayer
 
     if args.all_configs:
-        # configs are from paper Appendix A in section A.1: model specs
-        # (batch, hidden_dim, expansion_rate)
         configs = [
             (320, 1280, 4),
             (512, 1920, 4),
@@ -196,23 +268,26 @@ def main():
         configs = [(args.batch, args.hidden, args.expansion)]
 
     print("mHC Layer Python Benchmark")
-    print("=" * 60)
+    print("=" * 80)
     print(f"Device: {torch.cuda.get_device_name(0)}")
     print(f"Sinkhorn iterations: {args.sinkhorn_iters}")
     print(f"Warmup: {args.warmup}, Runs: {args.runs}")
     print()
 
+    print("Static H Path (shared H across batch)")
+    print("-" * 80)
     print(
         f"{'Batch':>6} {'Hidden':>6} {'n':>4} {'Fused (ms)':>12} {'Naive (ms)':>12} "
         f"{'Speedup':>10}"
     )
-    print("-" * 60)
+    print("-" * 80)
 
     for B, C, n in configs:
         fused_layer = MHCLayer(
             hidden_dim=C,
             expansion_rate=n,
             sinkhorn_iters=args.sinkhorn_iters,
+            use_dynamic_h=False,
         ).to(device)
 
         naive_layer = NaiveMHCLayer(
@@ -238,21 +313,65 @@ def main():
         del fused_layer, naive_layer
         torch.cuda.empty_cache()
 
+    print()
+    print(
+        "Dynamic H Path (per-batch H values which is how the paper is implementing mHC layer)"
+    )
+    print("-" * 80)
+    print(
+        f"{'Batch':>6} {'Hidden':>6} {'n':>4} {'Fused (ms)':>12} {'Naive (ms)':>12} "
+        f"{'Speedup':>10}"
+    )
+    print("-" * 80)
+
+    for B, C, n in configs:
+        fused_layer = MHCLayer(
+            hidden_dim=C,
+            expansion_rate=n,
+            sinkhorn_iters=args.sinkhorn_iters,
+            use_dynamic_h=True,
+        ).to(device)
+
+        naive_layer = NaiveMHCLayerDynamic(
+            hidden_dim=C,
+            expansion_rate=n,
+            sinkhorn_iters=args.sinkhorn_iters,
+        ).to(device)
+
+        fused_time = benchmark_forward(
+            fused_layer, B, n, C, device, cleaner, args.warmup, args.runs
+        )
+
+        naive_time = benchmark_forward(
+            naive_layer, B, n, C, device, cleaner, args.warmup, args.runs
+        )
+
+        speedup = naive_time / fused_time
+
+        print(
+            f"{B:>6} {C:>6} {n:>4} {fused_time:>12.3f} {naive_time:>12.3f} "
+            f"{speedup:>9.2f}x"
+        )
+
+        del fused_layer, naive_layer
+        torch.cuda.empty_cache()
+
     if args.backward:
         print()
-        print("Backward Pass (forward + backward)")
-        print("-" * 60)
+        print("Backward Pass Static H (forward + backward)")
+        print("-" * 80)
         print(
             f"{'Batch':>6} {'Hidden':>6} {'n':>4} {'Fused (ms)':>12} {'Naive (ms)':>12} "
             f"{'Speedup':>10}"
         )
-        print("-" * 60)
+        print("-" * 80)
 
         for B, C, n in configs:
             fused_layer = MHCLayer(
                 hidden_dim=C,
                 expansion_rate=n,
                 sinkhorn_iters=args.sinkhorn_iters,
+                use_dynamic_h=False,
             ).to(device)
 
             naive_layer = NaiveMHCLayer(
@@ -271,6 +390,49 @@ def main():
             fused_time = benchmark_backward(
                 fused_layer, B, n, C, device, cleaner, args.warmup, args.runs
             )
+            naive_time = benchmark_backward(
+                naive_layer, B, n, C, device, cleaner, args.warmup, args.runs
+            )
+
+            speedup = naive_time / fused_time
+
+            print(
+                f"{B:>6} {C:>6} {n:>4} {fused_time:>12.3f} {naive_time:>12.3f} "
+                f"{speedup:>9.2f}x"
+            )
+
+            del fused_layer, naive_layer
+            torch.cuda.empty_cache()
+
+        print()
+        print(
+            "Backward Pass Dynamic H Path (forward + backward) (this is how the paper is implementing mHC layer)"
+        )
+        print("-" * 80)
+        print(
+            f"{'Batch':>6} {'Hidden':>6} {'n':>4} {'Fused (ms)':>12} {'Naive (ms)':>12} "
+            f"{'Speedup':>10}"
+        )
+        print("-" * 80)
+
+        for B, C, n in configs:
+            fused_layer = MHCLayer(
+                hidden_dim=C,
+                expansion_rate=n,
+                sinkhorn_iters=args.sinkhorn_iters,
+                use_dynamic_h=True,
+            ).to(device)
+
+            naive_layer = NaiveMHCLayerDynamic(
+                hidden_dim=C,
+                expansion_rate=n,
+                sinkhorn_iters=args.sinkhorn_iters,
+            ).to(device)
+
+            fused_time = benchmark_backward(
+                fused_layer, B, n, C, device, cleaner, args.warmup, args.runs
+            )
+
             naive_time = benchmark_backward(
                 naive_layer, B, n, C, device, cleaner, args.warmup, args.runs
             )

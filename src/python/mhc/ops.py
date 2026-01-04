@@ -44,71 +44,12 @@ class RMSNormFunction(Function):
         return d_inp, d_weight, None
 
 
-class StreamAggregateFunction(Function):
-    @staticmethod
-    def forward(ctx, inp, H_pre):
-        out = mhc_cuda.stream_aggregate_fwd(inp.contiguous(), H_pre.contiguous())
-        ctx.save_for_backward(inp, H_pre)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        inp, H_pre = ctx.saved_tensors
-        d_inp, d_H_pre = mhc_cuda.stream_aggregate_bwd(
-            grad_output.contiguous(), inp, H_pre
-        )
-        return d_inp, d_H_pre
-
-
-class StreamDistributeFunction(Function):
-    @staticmethod
-    def forward(ctx, inp, H_post, n):
-        out = mhc_cuda.stream_distribute_fwd(inp.contiguous(), H_post.contiguous(), n)
-        ctx.save_for_backward(inp, H_post)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        inp, H_post = ctx.saved_tensors
-        d_inp, d_H_post = mhc_cuda.stream_distribute_bwd(
-            grad_output.contiguous(), inp, H_post
-        )
-        return d_inp, d_H_post, None
-
-
-class StreamMixFunction(Function):
-    @staticmethod
-    def forward(ctx, inp, M):
-        out = mhc_cuda.stream_mix_fwd(inp.contiguous(), M.contiguous())
-        ctx.save_for_backward(inp, M)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        inp, M = ctx.saved_tensors
-        d_inp, d_M = mhc_cuda.stream_mix_bwd(grad_output.contiguous(), inp, M)
-        return d_inp, d_M
-
-
 def sinkhorn_knopp(inp, num_iters=20, eps=1e-8):
     return SinkhornKnoppFunction.apply(inp.float(), num_iters, eps)
 
 
 def rmsnorm(inp, weight, eps=1e-5):
     return RMSNormFunction.apply(inp.bfloat16(), weight.bfloat16(), eps)
-
-
-def stream_aggregate(inp, H_pre):
-    return StreamAggregateFunction.apply(inp.float(), H_pre.float())
-
-
-def stream_distribute(inp, H_post):
-    n = H_post.size(0)
-    return StreamDistributeFunction.apply(inp.float(), H_post.float(), n)
-
-
-def stream_mix(inp, M):
-    return StreamMixFunction.apply(inp.float(), M.float())
 
 
 class MHCLayerFunction(Function):
@@ -190,6 +131,142 @@ def mhc_layer_fused(
         H_pre.float(),
         H_post.float(),
         H_res.float(),
+        sinkhorn_iters,
+        eps,
+    )
+
+
+class MHCLayerDynamicFunction(Function):
+    @staticmethod
+    def forward(
+        ctx,
+        x_expanded,
+        rmsnorm_weight,
+        phi_pre,
+        phi_post,
+        phi_res,
+        alpha_pre,
+        alpha_post,
+        alpha_res,
+        b_pre,
+        b_post,
+        b_res,
+        sinkhorn_iters,
+        eps,
+    ):
+        (
+            output,
+            rms,
+            x_agg_bf16,
+            H_pre_activated,
+            H_post_activated,
+            M,
+            y_norm_bf16,
+            x_flat_bf16,
+            rms_h,
+        ) = mhc_cuda.mhc_layer_fwd_dynamic(
+            x_expanded.contiguous(),
+            rmsnorm_weight.contiguous(),
+            phi_pre.contiguous(),
+            phi_post.contiguous(),
+            phi_res.contiguous(),
+            alpha_pre,
+            alpha_post,
+            alpha_res,
+            b_pre.contiguous(),
+            b_post.contiguous(),
+            b_res.contiguous(),
+            sinkhorn_iters,
+            eps,
+        )
+
+        ctx.save_for_backward(
+            x_expanded,
+            rmsnorm_weight,
+            rms,
+            x_agg_bf16,
+            H_pre_activated,
+            H_post_activated,
+            M,
+            y_norm_bf16,
+        )
+        ctx.eps = eps
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (
+            x_expanded,
+            rmsnorm_weight,
+            rms,
+            x_agg_bf16,
+            H_pre_activated,
+            H_post_activated,
+            M,
+            y_norm_bf16,
+        ) = ctx.saved_tensors
+
+        d_x, d_rmsnorm_weight = mhc_cuda.mhc_layer_bwd_dynamic(
+            grad_output.contiguous(),
+            x_expanded.contiguous(),
+            rmsnorm_weight.contiguous(),
+            rms.contiguous(),
+            x_agg_bf16.contiguous(),
+            H_pre_activated.contiguous(),
+            H_post_activated.contiguous(),
+            M.contiguous(),
+            y_norm_bf16.contiguous(),
+            ctx.eps,
+        )
+
+        return (
+            d_x,
+            d_rmsnorm_weight,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+def mhc_layer_fused_dynamic(
+    x_expanded,
+    rmsnorm_weight,
+    phi_pre,
+    phi_post,
+    phi_res,
+    alpha_pre,
+    alpha_post,
+    alpha_res,
+    b_pre,
+    b_post,
+    b_res,
+    sinkhorn_iters=20,
+    eps=1e-5,
+):
+    return MHCLayerDynamicFunction.apply(
+        x_expanded.float(),
+        rmsnorm_weight.bfloat16(),
+        phi_pre.float(),
+        phi_post.float(),
+        phi_res.float(),
+        alpha_pre.detach().item() if hasattr(alpha_pre, "detach") else float(alpha_pre),
+        (
+            alpha_post.detach().item()
+            if hasattr(alpha_post, "detach")
+            else float(alpha_post)
+        ),
+        alpha_res.detach().item() if hasattr(alpha_res, "detach") else float(alpha_res),
+        b_pre.float(),
+        b_post.float(),
+        b_res.float(),
         sinkhorn_iters,
         eps,
     )

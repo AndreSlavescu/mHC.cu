@@ -2,9 +2,174 @@
 
 #include <cstdio>
 #include <cmath>
+#include <cstring>
+#include <random>
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
+#include "mhc_types.h"
 
 namespace mhc {
+
+template<int BLOCK_SIZE>
+__global__ void float_to_bf16_kernel(floatX* __restrict__ out, const float* __restrict__ inp,
+                                     int size) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    if (idx < size) {
+        out[idx] = (floatX)inp[idx];
+    }
+}
+
+template<int BLOCK_SIZE>
+__global__ void bf16_to_float_kernel(float* __restrict__ out, const floatX* __restrict__ inp,
+                                     int size) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    if (idx < size) {
+        out[idx] = (float)inp[idx];
+    }
+}
+
+inline void float_to_bf16(floatX* out, const float* inp, int size, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    float_to_bf16_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, size);
+}
+
+inline void bf16_to_float(float* out, const floatX* inp, int size, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+    int num_blocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    bf16_to_float_kernel<BLOCK_SIZE><<<num_blocks, BLOCK_SIZE, 0, stream>>>(out, inp, size);
+}
+
+__device__ __forceinline__ float fast_exp(float x) {
+    return __expf(x);
+}
+
+__device__ __forceinline__ float fast_sigmoid(float x) {
+    return __frcp_rn(1.0f + __expf(-x));
+}
+
+template<int BLOCK_SIZE>
+__global__ void apply_alpha_bias_sigmoid_kernel(float* __restrict__ out,
+                                                const float* __restrict__ inp, float alpha,
+                                                const float* __restrict__ bias, int B, int n) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * n;
+    if (idx >= total)
+        return;
+    int j = idx % n;
+    float val = alpha * inp[idx] + bias[j];
+    out[idx] = fast_sigmoid(val);
+}
+
+template<int BLOCK_SIZE>
+__global__ void apply_alpha_bias_2sigmoid_kernel(float* __restrict__ out,
+                                                 const float* __restrict__ inp, float alpha,
+                                                 const float* __restrict__ bias, int B, int n) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * n;
+    if (idx >= total)
+        return;
+    int j = idx % n;
+    float val = alpha * inp[idx] + bias[j];
+    out[idx] = 2.0f * fast_sigmoid(val);
+}
+
+template<int BLOCK_SIZE>
+__global__ void apply_alpha_bias_exp_kernel(float* __restrict__ out, const float* __restrict__ inp,
+                                            float alpha, const float* __restrict__ bias, int B,
+                                            int n, int n_sq) {
+    int idx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
+    int total = B * n_sq;
+    if (idx >= total)
+        return;
+    int local_idx = idx % n_sq;
+    int i = local_idx / n;
+    int j = local_idx % n;
+    float bias_val = bias[i * n + j];
+    float val = alpha * inp[idx] + bias_val;
+    out[idx] = fast_exp(val);
+}
+
+inline void apply_alpha_bias_sigmoid(float* out, const float* inp, float alpha, const float* bias,
+                                     int B, int n, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK = 256;
+    int total = B * n;
+    int blocks = (total + BLOCK - 1) / BLOCK;
+
+#ifdef MHC_ENABLE_PDL
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;
+
+    cudaLaunchConfig_t config = {};
+    config.numAttrs = 1;
+    config.attrs = attrs;
+    config.blockDim = {BLOCK, 1, 1};
+    config.gridDim = {(unsigned int)blocks, 1, 1};
+    config.dynamicSmemBytes = 0;
+    config.stream = stream;
+
+    cudaLaunchKernelEx(&config, apply_alpha_bias_sigmoid_kernel<BLOCK>, out, inp, alpha, bias, B,
+                       n);
+#else
+    apply_alpha_bias_sigmoid_kernel<BLOCK>
+        <<<blocks, BLOCK, 0, stream>>>(out, inp, alpha, bias, B, n);
+#endif
+}
+
+inline void apply_alpha_bias_2sigmoid(float* out, const float* inp, float alpha, const float* bias,
+                                      int B, int n, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK = 256;
+    int total = B * n;
+    int blocks = (total + BLOCK - 1) / BLOCK;
+
+#ifdef MHC_ENABLE_PDL
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;
+
+    cudaLaunchConfig_t config = {};
+    config.numAttrs = 1;
+    config.attrs = attrs;
+    config.blockDim = {BLOCK, 1, 1};
+    config.gridDim = {(unsigned int)blocks, 1, 1};
+    config.dynamicSmemBytes = 0;
+    config.stream = stream;
+
+    cudaLaunchKernelEx(&config, apply_alpha_bias_2sigmoid_kernel<BLOCK>, out, inp, alpha, bias, B,
+                       n);
+#else
+    apply_alpha_bias_2sigmoid_kernel<BLOCK>
+        <<<blocks, BLOCK, 0, stream>>>(out, inp, alpha, bias, B, n);
+#endif
+}
+
+inline void apply_alpha_bias_exp(float* out, const float* inp, float alpha, const float* bias,
+                                 int B, int n, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK = 256;
+    int total = B * n * n;
+    int blocks = (total + BLOCK - 1) / BLOCK;
+
+#ifdef MHC_ENABLE_PDL
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;
+
+    cudaLaunchConfig_t config = {};
+    config.numAttrs = 1;
+    config.attrs = attrs;
+    config.blockDim = {BLOCK, 1, 1};
+    config.gridDim = {(unsigned int)blocks, 1, 1};
+    config.dynamicSmemBytes = 0;
+    config.stream = stream;
+
+    cudaLaunchKernelEx(&config, apply_alpha_bias_exp_kernel<BLOCK>, out, inp, alpha, bias, B, n,
+                       n * n);
+#else
+    apply_alpha_bias_exp_kernel<BLOCK>
+        <<<blocks, BLOCK, 0, stream>>>(out, inp, alpha, bias, B, n, n * n);
+#endif
+}
 
 __global__ void flush_l2_kernel(float* buf, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -45,6 +210,67 @@ inline float max_abs_diff(const float* a, const float* b, int n) {
     }
     return max_diff;
 }
+
+template<typename T> struct DeviceBuffer {
+    T* ptr;
+    size_t size;
+
+    DeviceBuffer(size_t n) : size(n) { CHECK_CUDA(cudaMalloc(&ptr, n * sizeof(T))); }
+
+    ~DeviceBuffer() {
+        if (ptr)
+            cudaFree(ptr);
+    }
+
+    void copy_from_host(const T* host) {
+        CHECK_CUDA(cudaMemcpy(ptr, host, size * sizeof(T), cudaMemcpyHostToDevice));
+    }
+
+    void copy_to_host(T* host) {
+        CHECK_CUDA(cudaMemcpy(host, ptr, size * sizeof(T), cudaMemcpyDeviceToHost));
+    }
+
+    void zero() { CHECK_CUDA(cudaMemset(ptr, 0, size * sizeof(T))); }
+
+    operator T*() { return ptr; }
+    operator const T*() const { return ptr; }
+
+    DeviceBuffer(const DeviceBuffer&) = delete;
+    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+};
+
+template<typename T> struct HostBuffer {
+    T* ptr;
+    size_t size;
+
+    HostBuffer(size_t n) : size(n) { ptr = new T[n]; }
+
+    ~HostBuffer() { delete[] ptr; }
+
+    void fill_random(float mean = 0.0f, float std = 0.5f, unsigned seed = 42) {
+        std::mt19937 gen(seed);
+        std::normal_distribution<float> dist(mean, std);
+        for (size_t i = 0; i < size; i++) {
+            ptr[i] = static_cast<T>(dist(gen));
+        }
+    }
+
+    void fill_uniform(float low = 0.0f, float high = 1.0f, unsigned seed = 42) {
+        std::mt19937 gen(seed);
+        std::uniform_real_distribution<float> dist(low, high);
+        for (size_t i = 0; i < size; i++) {
+            ptr[i] = static_cast<T>(dist(gen));
+        }
+    }
+
+    void zero() { memset(ptr, 0, size * sizeof(T)); }
+
+    operator T*() { return ptr; }
+    operator const T*() const { return ptr; }
+
+    HostBuffer(const HostBuffer&) = delete;
+    HostBuffer& operator=(const HostBuffer&) = delete;
+};
 
 inline float mean_abs_diff(const float* a, const float* b, int n) {
     float sum = 0.0f;
@@ -281,4 +507,5 @@ struct HostProfiler {
         }
     }
 };
+
 } // namespace mhc

@@ -12,6 +12,18 @@ def get_cuda_arch_flags():
     return [f"-gencode=arch=compute_{major}{minor},code=sm_{major}{minor}"]
 
 
+def get_extra_defines():
+    import torch
+
+    if not torch.cuda.is_available():
+        return []
+    major, _ = torch.cuda.get_device_capability()
+    defines = []
+    if major >= 9:
+        defines.append("-DMHC_ENABLE_PDL")
+    return defines
+
+
 setup(
     name="mhc",
     version="0.1.0",
@@ -38,7 +50,8 @@ setup(
                     "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
                     "--use_fast_math",
                 ]
-                + get_cuda_arch_flags(),
+                + get_cuda_arch_flags()
+                + get_extra_defines(),
             },
             libraries=["cublas", "cublasLt"],
         )

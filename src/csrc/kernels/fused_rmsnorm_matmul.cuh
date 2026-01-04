@@ -54,13 +54,102 @@ __global__ void compute_rms_kernel(float* __restrict__ rms_out, const floatX* __
     }
 }
 
+template<int BLOCK_SIZE>
+__global__ void compute_rms_kernel_vectorized(float* __restrict__ rms_out,
+                                              const floatX* __restrict__ inp, int N, int C,
+                                              float eps) {
+    cg::thread_block block = cg::this_thread_block();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+
+    int idx = blockIdx.x;
+    if (idx >= N)
+        return;
+
+    const floatX* x = inp + idx * C;
+
+    extern __shared__ float shared[];
+
+    constexpr int VEC_SIZE = 8;
+    int C_vec = C / VEC_SIZE;
+
+    float thread_sum_sq = 0.0f;
+
+    using vec_t = float4;
+    const vec_t* x_vec = reinterpret_cast<const vec_t*>(x);
+
+    for (int i = threadIdx.x; i < C_vec; i += BLOCK_SIZE) {
+        vec_t v = x_vec[i];
+        nv_bfloat162* bf_v = reinterpret_cast<nv_bfloat162*>(&v);
+
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            float2 f = __bfloat1622float2(bf_v[j]);
+            thread_sum_sq += f.x * f.x + f.y * f.y;
+        }
+    }
+
+    int remainder_start = C_vec * VEC_SIZE;
+    for (int i = remainder_start + threadIdx.x; i < C; i += BLOCK_SIZE) {
+        float val = (float)x[i];
+        thread_sum_sq += val * val;
+    }
+
+    float warp_sum = cg::reduce(warp, thread_sum_sq, cg::plus<float>());
+
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+    int num_warps = BLOCK_SIZE / 32;
+
+    if (lane_id == 0) {
+        shared[warp_id] = warp_sum;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float val = (lane_id < num_warps) ? shared[lane_id] : 0.0f;
+        float block_sum = cg::reduce(warp, val, cg::plus<float>());
+
+        if (lane_id == 0) {
+            float rms = sqrtf(block_sum / (float)C + eps);
+            rms_out[idx] = rms;
+        }
+    }
+}
+
 inline void compute_rms(float* rms_out, const floatX* inp, int N, int C, float eps,
                         cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 512;
     int num_warps = BLOCK_SIZE / 32;
     size_t shared_mem = num_warps * sizeof(float);
 
-    compute_rms_kernel<BLOCK_SIZE><<<N, BLOCK_SIZE, shared_mem, stream>>>(rms_out, inp, N, C, eps);
+#ifdef MHC_ENABLE_PDL
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;
+
+    cudaLaunchConfig_t config = {};
+    config.numAttrs = 1;
+    config.attrs = attrs;
+    config.blockDim = {BLOCK_SIZE, 1, 1};
+    config.gridDim = {(unsigned int)N, 1, 1};
+    config.dynamicSmemBytes = shared_mem;
+    config.stream = stream;
+
+    if (C % 8 == 0 && C >= 64) {
+        cudaLaunchKernelEx(&config, compute_rms_kernel_vectorized<BLOCK_SIZE>, rms_out, inp, N, C,
+                           eps);
+    } else {
+        cudaLaunchKernelEx(&config, compute_rms_kernel<BLOCK_SIZE>, rms_out, inp, N, C, eps);
+    }
+#else
+    if (C % 8 == 0 && C >= 64) {
+        compute_rms_kernel_vectorized<BLOCK_SIZE>
+            <<<N, BLOCK_SIZE, shared_mem, stream>>>(rms_out, inp, N, C, eps);
+    } else {
+        compute_rms_kernel<BLOCK_SIZE>
+            <<<N, BLOCK_SIZE, shared_mem, stream>>>(rms_out, inp, N, C, eps);
+    }
+#endif
 }
 
 template<int BLOCK_SIZE>
@@ -78,10 +167,65 @@ __global__ void divide_by_rms_kernel(float* __restrict__ out, const float* __res
     }
 }
 
+template<int BLOCK_SIZE>
+__global__ void divide_by_rms_kernel_vectorized(float* __restrict__ out,
+                                                const float* __restrict__ rms, int M, int N) {
+    int row = blockIdx.x;
+    if (row >= M)
+        return;
+
+    float r_inv = 1.0f / rms[row];
+    float* out_row = out + row * N;
+
+    constexpr int VEC_SIZE = 4;
+    int N_vec = N / VEC_SIZE;
+
+    float4* out_vec = reinterpret_cast<float4*>(out_row);
+
+    for (int i = threadIdx.x; i < N_vec; i += BLOCK_SIZE) {
+        float4 v = out_vec[i];
+        v.x *= r_inv;
+        v.y *= r_inv;
+        v.z *= r_inv;
+        v.w *= r_inv;
+        out_vec[i] = v;
+    }
+
+    int remainder_start = N_vec * VEC_SIZE;
+    for (int i = remainder_start + threadIdx.x; i < N; i += BLOCK_SIZE) {
+        out_row[i] *= r_inv;
+    }
+}
+
 inline void divide_by_rms(float* out, const float* rms, int M, int N,
                           cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
-    divide_by_rms_kernel<BLOCK_SIZE><<<M, BLOCK_SIZE, 0, stream>>>(out, rms, M, N);
+
+#ifdef MHC_ENABLE_PDL
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;
+
+    cudaLaunchConfig_t config = {};
+    config.numAttrs = 1;
+    config.attrs = attrs;
+    config.blockDim = {BLOCK_SIZE, 1, 1};
+    config.gridDim = {(unsigned int)M, 1, 1};
+    config.dynamicSmemBytes = 0;
+    config.stream = stream;
+
+    if (N % 4 == 0 && N >= 16) {
+        cudaLaunchKernelEx(&config, divide_by_rms_kernel_vectorized<BLOCK_SIZE>, out, rms, M, N);
+    } else {
+        cudaLaunchKernelEx(&config, divide_by_rms_kernel<BLOCK_SIZE>, out, rms, M, N);
+    }
+#else
+    if (N % 4 == 0 && N >= 16) {
+        divide_by_rms_kernel_vectorized<BLOCK_SIZE><<<M, BLOCK_SIZE, 0, stream>>>(out, rms, M, N);
+    } else {
+        divide_by_rms_kernel<BLOCK_SIZE><<<M, BLOCK_SIZE, 0, stream>>>(out, rms, M, N);
+    }
+#endif
 }
 
 struct MatmulDescriptors {

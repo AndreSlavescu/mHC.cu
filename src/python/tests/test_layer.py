@@ -4,11 +4,11 @@ import pytest
 torch.manual_seed(42)
 
 
-def test_layer_forward():
+def test_layer_forward_static():
     from mhc import MHCLayer
 
     B, n, C = 8, 4, 128
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
 
     x = torch.randn(B, n, C, device="cuda")
     out = layer(x)
@@ -18,11 +18,25 @@ def test_layer_forward():
     assert not torch.isinf(out).any()
 
 
-def test_layer_backward():
+def test_layer_forward_dynamic():
     from mhc import MHCLayer
 
     B, n, C = 8, 4, 128
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=True).cuda()
+
+    x = torch.randn(B, n, C, device="cuda")
+    out = layer(x)
+
+    assert out.shape == (B, n, C)
+    assert not torch.isnan(out).any()
+    assert not torch.isinf(out).any()
+
+
+def test_layer_backward_static():
+    from mhc import MHCLayer
+
+    B, n, C = 8, 4, 128
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
 
     x = (torch.randn(B, n, C, device="cuda") + 0.1).requires_grad_(True)
     out = layer(x)
@@ -37,11 +51,29 @@ def test_layer_backward():
         assert not torch.isnan(param.grad).any(), f"{name} has NaN gradient"
 
 
-def test_layer_parameters():
+def test_layer_backward_dynamic():
+    from mhc import MHCLayer
+
+    B, n, C = 8, 4, 128
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=True).cuda()
+
+    x = (torch.randn(B, n, C, device="cuda") + 0.1).requires_grad_(True)
+    out = layer(x)
+    loss = out.sum()
+    loss.backward()
+
+    assert x.grad is not None
+    assert not torch.isnan(x.grad).any()
+
+    assert layer.rmsnorm_weight.grad is not None
+    assert not torch.isnan(layer.rmsnorm_weight.grad).any()
+
+
+def test_layer_parameters_static():
     from mhc import MHCLayer
 
     C, n = 128, 4
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
 
     params = dict(layer.named_parameters())
     assert "rmsnorm_weight" in params
@@ -55,11 +87,26 @@ def test_layer_parameters():
     assert params["H_res"].shape == (n, n)
 
 
-def test_layer_training_step():
+def test_layer_parameters_dynamic():
+    from mhc import MHCLayer
+
+    C, n = 128, 4
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=True).cuda()
+
+    params = dict(layer.named_parameters())
+    assert "rmsnorm_weight" in params
+    assert "H_pre" not in params
+    assert "H_post" not in params
+    assert "H_res" not in params
+
+    assert params["rmsnorm_weight"].shape == (C,)
+
+
+def test_layer_training_step_static():
     from mhc import MHCLayer
 
     B, n, C = 8, 4, 128
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
     optimizer = torch.optim.Adam(layer.parameters(), lr=1e-3)
 
     x = torch.randn(B, n, C, device="cuda")
@@ -75,11 +122,11 @@ def test_layer_training_step():
     assert not torch.isnan(loss)
 
 
-def test_layer_different_batch_sizes():
+def test_layer_different_batch_sizes_static():
     from mhc import MHCLayer
 
     n, C = 4, 128
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
 
     for B in [1, 4, 16, 32]:
         x = torch.randn(B, n, C, device="cuda")
@@ -87,11 +134,23 @@ def test_layer_different_batch_sizes():
         assert out.shape == (B, n, C)
 
 
-def test_layer_numerical_stability():
+def test_layer_different_batch_sizes_dynamic():
+    from mhc import MHCLayer
+
+    n, C = 4, 128
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=True).cuda()
+
+    for B in [1, 4, 16, 32]:
+        x = torch.randn(B, n, C, device="cuda")
+        out = layer(x)
+        assert out.shape == (B, n, C)
+
+
+def test_layer_numerical_stability_static():
     from mhc import MHCLayer
 
     B, n, C = 8, 4, 128
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
 
     x_large = torch.randn(B, n, C, device="cuda") * 100
     out = layer(x_large)
@@ -104,11 +163,11 @@ def test_layer_numerical_stability():
     assert not torch.isinf(out).any()
 
 
-def test_layer_deterministic():
+def test_layer_deterministic_static():
     from mhc import MHCLayer
 
     B, n, C = 8, 4, 128
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
 
     x = torch.randn(B, n, C, device="cuda")
     out1 = layer(x)
@@ -117,11 +176,25 @@ def test_layer_deterministic():
     assert torch.allclose(out1, out2)
 
 
-def test_layer_gradient_flow():
+def test_layer_deterministic_dynamic():
     from mhc import MHCLayer
 
     B, n, C = 8, 4, 128
-    layer = MHCLayer(hidden_dim=C, expansion_rate=n).cuda()
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=True).cuda()
+
+    x = torch.randn(B, n, C, device="cuda")
+
+    out1 = layer(x)
+    out2 = layer(x)
+
+    assert torch.allclose(out1, out2)
+
+
+def test_layer_gradient_flow_static():
+    from mhc import MHCLayer
+
+    B, n, C = 8, 4, 128
+    layer = MHCLayer(hidden_dim=C, expansion_rate=n, use_dynamic_h=False).cuda()
 
     x = (torch.randn(B, n, C, device="cuda") + 0.1).requires_grad_(True)
     out = layer(x)
@@ -133,6 +206,13 @@ def test_layer_gradient_flow():
     grad_norm = x.grad.norm()
     assert grad_norm > 0, "Gradient should flow through"
     assert grad_norm < 1e6, "Gradient should not explode"
+
+
+def test_default_is_dynamic():
+    from mhc import MHCLayer
+
+    layer = MHCLayer(hidden_dim=128, expansion_rate=4)
+    assert layer.use_dynamic_h is True
 
 
 if __name__ == "__main__":

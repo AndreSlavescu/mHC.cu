@@ -2,18 +2,14 @@ from .layer import MHCLayer
 from .ops import (
     sinkhorn_knopp,
     rmsnorm,
-    stream_aggregate,
-    stream_distribute,
-    stream_mix,
     mhc_layer_fused,
+    mhc_layer_fused_dynamic,
 )
 
 __all__ = [
     "MHCLayer",
     "sinkhorn_knopp",
     "rmsnorm",
-    "stream_aggregate",
-    "stream_distribute",
-    "stream_mix",
     "mhc_layer_fused",
+    "mhc_layer_fused_dynamic",
 ]
