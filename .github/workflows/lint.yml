@@ -1,0 +1,48 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: |
+          pip install ruff black
+          sudo apt-get update && sudo apt-get install -y cppcheck clang-format
+
+      - name: Check Python formatting with black
+        run: black --check src/python/
+
+      - name: Python linting with ruff
+        run: ruff check src/python/
+
+      - name: Check C++ / CUDA formatting with clang-format
+        run: |
+          find src/csrc -name "*.cu" -o -name "*.cuh" -o -name "*.h" -o -name "*.cpp" | xargs clang-format --dry-run --Werror
+
+      - name: C++ / CUDA linting with cppcheck
+        run: |
+          find src/csrc \( -name "*.cu" -o -name "*.cuh" -o -name "*.h" -o -name "*.cpp" \) -not -path "src/csrc/build/*" | \
+            xargs cppcheck --enable=warning,performance,portability \
+            --suppress=missingIncludeSystem \
+            --suppress=unmatchedSuppression \
+            --suppress=syntaxError \
+            --suppress=shiftTooManyBits \
+            --suppress=uninitMemberVar \
+            --suppress=duplicateAssignExpression \
+            --inline-suppr \
+            --language=c++ \
+            -I src/csrc/include \
+            -I src/csrc/kernels

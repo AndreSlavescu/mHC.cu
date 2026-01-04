@@ -1,4 +1,4 @@
-.PHONY: all build test test-python bench bench-python clean format install install-dev force-install
+.PHONY: all build test test-python bench bench-python clean format lint install install-dev force-install
 
 CUDA_ARCH ?= "80;86;89;90;100"
 BUILD_DIR = build
@@ -67,3 +67,21 @@ clean:
 format:
 	find src/csrc -name "*.cu" -o -name "*.cuh" -o -name "*.h" -o -name "*.cpp" | xargs clang-format -i
 	black src/python
+
+lint:
+	@echo "python linting with ruff..."
+	ruff check src/python/
+	@echo ""
+	@echo "c++ / cuda linting with cppcheck..."
+	find src/csrc \( -name "*.cu" -o -name "*.cuh" -o -name "*.h" -o -name "*.cpp" \) -not -path "src/csrc/build/*" | \
+		xargs cppcheck --enable=warning,performance,portability \
+		--suppress=missingIncludeSystem \
+		--suppress=unmatchedSuppression \
+		--suppress=syntaxError \
+		--suppress=shiftTooManyBits \
+		--suppress=uninitMemberVar \
+		--suppress=duplicateAssignExpression \
+		--inline-suppr \
+		--language=c++ \
+		-I src/csrc/include \
+		-I src/csrc/kernels
