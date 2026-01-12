@@ -2,14 +2,53 @@
 
 unofficial CUDA implementation of mHC: Manifold-Constrained Hyper-Connections by DeepSeek-AI
 
-## Installation
+## Running on Modal
+
+Once the image builds the first time, it will be cached and will not require a rebuild.
+
+### Supported GPUs
+
+```bash
+--gpu h100 # H100 80GB HBM3 SXM5 model
+--gpu b200 # B200
+```
+
+### Benchmark
+
+```bash
+# python bench
+modal run runmodal.py --gpu h100 --mode bench --scope python
+
+# c++ / cuda bench
+modal run runmodal.py --gpu h100 --mode bench --scope native
+
+# run all benches
+modal run runmodal.py --gpu h100 --mode bench --scope all
+```
+
+### Test
+
+```bash
+# python bench
+modal run runmodal.py --gpu h100 --mode test --scope python
+
+# cpp / cuda bench
+modal run runmodal.py --gpu h100 --mode test --scope native
+
+# run all benches
+modal run runmodal.py --gpu h100 --mode test --scope all
+```
+
+## Local 
+
+### Installation
 
 ```bash
 make install      # install PyTorch extension
 make install-dev  # install with dev dependencies
 ```
 
-## Build
+### Build
 
 ```bash
 make              # build C++ / CUDA source for all architectures
@@ -17,14 +56,14 @@ make CUDA_ARCH=90 # build for specific arch (H100)
 make clean        # clean build
 ```
 
-## Test
+### Test
 
 ```bash
 make test         # C++ / CUDA tests
 make test-python  # Python tests
 ```
 
-## Benchmark
+### Benchmark
 
 ```bash
 make bench        # run all C++ / CUDA benchmarks
