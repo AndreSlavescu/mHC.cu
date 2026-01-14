@@ -73,7 +73,7 @@ class NaiveMHCLayer(nn.Module):
 
 class NaiveMHCLayerDynamic(nn.Module):
     """
-    Dynamic H computation as per the paper (Equations: 7-9):
+    Dynamic H computation (Equations: 7-9):
     1. Flatten x -> RMSNorm -> Linear projections to get tilde_H values
     2. H_pre = sigmoid(tilde_H_pre), H_post = 2*sigmoid(tilde_H_post)
     3. M = Sinkhorn-Knopp(tilde_H_res)
@@ -322,9 +322,7 @@ def main():
         torch.cuda.empty_cache()
 
     print()
-    print(
-        "Dynamic H Path (per-batch H values which is how the paper is implementing mHC layer)"
-    )
+    print("Dynamic H Path (per-batch H values)")
     print("-" * 80)
     print(
         f"{'Batch':>6} {'Hidden':>6} {'n':>4} {'Fused (ms)':>12} {'Naive (ms)':>12} "
@@ -413,9 +411,7 @@ def main():
             torch.cuda.empty_cache()
 
         print()
-        print(
-            "Backward Pass Dynamic H Path (forward + backward) (this is how the paper is implementing mHC layer)"
-        )
+        print("Backward Pass Dynamic H Path (forward + backward)")
         print("-" * 80)
         print(
             f"{'Batch':>6} {'Hidden':>6} {'n':>4} {'Fused (ms)':>12} {'Naive (ms)':>12} "

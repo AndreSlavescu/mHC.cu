@@ -1,20 +1,22 @@
 import torch
 import torch.nn as nn
-from .ops import mhc_layer_fused, mhc_layer_fused_dynamic, mhc_layer_fused_inference
+from .ops import (
+    mhc_layer_fused,
+    mhc_layer_fused_dynamic,
+    mhc_layer_fused_dynamic_inference,
+    mhc_layer_fused_inference,
+)
 
 
 class MHCLayer(nn.Module):
     """
-    Based on the following paper: "mHC: Manifold-Constrained Hyper-Connections" (DeepSeek-AI, 2025)
-    https://arxiv.org/abs/2512.24880
-
     Args:
         hidden_dim: The hidden dimension (C).
         expansion_rate: The expansion rate (n).
         sinkhorn_iters: Number of Sinkhorn-Knopp iterations.
         eps: Epsilon for numerical stability.
         alpha_init: Initialization scale for alpha parameters.
-        use_dynamic_h: If True, uses per-batch H values computed from x (paper's approach).
+        use_dynamic_h: If True, uses per-batch H values computed from x.
                        If False, uses static shared H values.
     """
 
@@ -64,6 +66,22 @@ class MHCLayer(nn.Module):
         assert C == self.hidden_dim
 
         if self.use_dynamic_h:
+            if not self.training and not torch.is_grad_enabled():
+                return mhc_layer_fused_dynamic_inference(
+                    x_expanded,
+                    self.rmsnorm_weight,
+                    self.phi_pre,
+                    self.phi_post,
+                    self.phi_res,
+                    self.alpha_pre,
+                    self.alpha_post,
+                    self.alpha_res,
+                    self.b_pre,
+                    self.b_post,
+                    self.b_res,
+                    self.sinkhorn_iters,
+                    self.eps,
+                )
             return mhc_layer_fused_dynamic(
                 x_expanded,
                 self.rmsnorm_weight,

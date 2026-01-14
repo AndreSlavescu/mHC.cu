@@ -830,7 +830,7 @@ __global__ void sinkhorn_knopp_batched_n4_kernel(float* __restrict__ out,
                                                  int num_iters, float eps) {
     static_assert(N_COMPILE == 4,
                   "This kernel is optimized for the case where n=4, which is the special case "
-                  "presented in the paper in section 4.3 introduction.");
+                  "highlighted in the section 4.3 introduction.");
 
     int batch_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (batch_idx >= B)

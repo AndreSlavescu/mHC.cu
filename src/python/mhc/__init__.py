@@ -4,6 +4,7 @@ from .ops import (
     rmsnorm,
     mhc_layer_fused,
     mhc_layer_fused_dynamic,
+    mhc_layer_fused_dynamic_inference,
 )
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "rmsnorm",
     "mhc_layer_fused",
     "mhc_layer_fused_dynamic",
+    "mhc_layer_fused_dynamic_inference",
 ]

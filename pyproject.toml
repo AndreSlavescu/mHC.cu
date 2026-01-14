@@ -9,7 +9,16 @@ description = "CUDA implementation of Manifold-Constrained Hyper-Connections"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
-dependencies = ["torch>=2.0.0"]
+dependencies = [
+  "accelerate>=0.26.0",
+  "datasets",
+  "safetensors",
+  "sentencepiece",
+  "tiktoken",
+  "torch>=2.0.0",
+  "tqdm",
+  "transformers",
+]
 
 [project.urls]
 Homepage = "https://github.com/AndreSlavescu/mHC.cu"
