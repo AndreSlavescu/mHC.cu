@@ -39,6 +39,8 @@ inline void bf16_to_float(float* out, const floatX* inp, int size, cudaStream_t 
 }
 
 __device__ __forceinline__ float fast_exp(float x) {
+    constexpr float kExpClamp = 20.0f;
+    x = fminf(x, kExpClamp);
     return __expf(x);
 }
 

@@ -39,6 +39,35 @@ modal run runmodal.py --gpu h100 --mode test --scope native
 modal run runmodal.py --gpu h100 --mode test --scope all
 ```
 
+### Training
+
+This trainer approximates the paper’s small-model scaling with a dense Transformer
+and mHC residual mixing (no MoE/MLA). It uses the fused CUDA path for mHC dynamic
+H computation when available and streams loss to the Modal logs.
+
+```bash
+modal run runmodal.py --gpu b200 --mode train --train-args "\
+  --preset 3b \
+  --scale 0.25 \
+  --seq-len 1024 \
+  --batch-size 2 \
+  --grad-clip 1.0 \
+  --grad-accum 4 \
+  --max-steps 10 \
+  --sdp-kernel flash \
+  --logits-chunk-size 512 \
+  --recompute-ratio 0.9 \
+  --run-name train-3b \
+  --log-memory" \
+  --download
+```
+
+Download checkpoints and metrics after the run:
+
+```bash
+modal volume get mhc-runs:/runs/train-3b ./runs/train-3b
+```
+
 ## Local 
 
 ### Installation

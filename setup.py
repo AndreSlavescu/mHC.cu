@@ -58,7 +58,16 @@ setup(
     ],
     cmdclass={"build_ext": BuildExtension},
     python_requires=">=3.10",
-    install_requires=["torch>=2.0.0"],
+    install_requires=[
+        "accelerate>=0.26.0",
+        "datasets",
+        "safetensors",
+        "sentencepiece",
+        "tiktoken",
+        "torch>=2.0.0",
+        "tqdm",
+        "transformers",
+    ],
     extras_require={
         "dev": ["black", "pytest"],
     },

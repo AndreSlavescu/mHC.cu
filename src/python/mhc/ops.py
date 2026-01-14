@@ -170,11 +170,18 @@ class MHCLayerDynamicFunction(Function):
         eps,
     ):
         n = phi_pre.size(0)
-        phi_concat = (
-            torch.cat([phi_pre, phi_post, phi_res.view(n * n, -1)], dim=0)
-            .bfloat16()
-            .contiguous()
+        phi_res_view = phi_res.view(n * n, -1)
+        nC = phi_pre.size(1)
+        out_dim = n + n + n * n
+        phi_concat = torch.empty(
+            (out_dim, nC),
+            device=phi_pre.device,
+            dtype=torch.bfloat16,
         )
+        # Avoid a large float32 concat temporary to reduce peak memory.
+        phi_concat[:n].copy_(phi_pre)
+        phi_concat[n : 2 * n].copy_(phi_post)
+        phi_concat[2 * n :].copy_(phi_res_view)
         alpha_pre_val = (
             float(alpha_pre.item()) if torch.is_tensor(alpha_pre) else float(alpha_pre)
         )
@@ -303,6 +310,7 @@ class MHCLayerDynamicFunction(Function):
             b_res_f32 = b_res.float()
 
             tilde_res = alpha_res_f32 * p_res * rms_inv.view(B, 1, 1) + b_res_f32
+            tilde_res = torch.clamp(tilde_res, max=20.0)
             H_res_exp = torch.exp(tilde_res)
 
             d_H_res_exp = torch.empty_like(H_res_exp)
@@ -415,3 +423,67 @@ def mhc_layer_fused_dynamic(
         sinkhorn_iters,
         eps,
     )
+
+
+def mhc_layer_fused_dynamic_inference(
+    x_expanded,
+    rmsnorm_weight,
+    phi_pre,
+    phi_post,
+    phi_res,
+    alpha_pre,
+    alpha_post,
+    alpha_res,
+    b_pre,
+    b_post,
+    b_res,
+    sinkhorn_iters=20,
+    eps=1e-5,
+):
+    n = phi_pre.size(0)
+    phi_res_view = phi_res.view(n * n, -1)
+    nC = phi_pre.size(1)
+    out_dim = n + n + n * n
+    phi_concat = torch.empty(
+        (out_dim, nC),
+        device=phi_pre.device,
+        dtype=torch.bfloat16,
+    )
+    phi_concat[:n].copy_(phi_pre)
+    phi_concat[n : 2 * n].copy_(phi_post)
+    phi_concat[2 * n :].copy_(phi_res_view)
+    alpha_pre_val = (
+        float(alpha_pre.item()) if torch.is_tensor(alpha_pre) else float(alpha_pre)
+    )
+    alpha_post_val = (
+        float(alpha_post.item()) if torch.is_tensor(alpha_post) else float(alpha_post)
+    )
+    alpha_res_val = (
+        float(alpha_res.item()) if torch.is_tensor(alpha_res) else float(alpha_res)
+    )
+    x_f32 = x_expanded.float().contiguous()
+    H_pre_activated, H_post_activated, M = mhc_cuda.mhc_dynamic_h_fwd(
+        x_f32,
+        phi_concat,
+        alpha_pre_val,
+        alpha_post_val,
+        alpha_res_val,
+        b_pre.float().contiguous(),
+        b_post.float().contiguous(),
+        b_res.float().contiguous(),
+        sinkhorn_iters,
+        eps,
+    )
+    x_agg_bf16 = mhc_cuda.mhc_dynamic_aggregate_fwd(x_f32, H_pre_activated)
+    y_norm_bf16, _ = mhc_cuda.rmsnorm_fwd(
+        x_agg_bf16.contiguous(),
+        rmsnorm_weight.bfloat16().contiguous(),
+        eps,
+    )
+    output = mhc_cuda.mhc_dynamic_mix_fwd(
+        x_f32,
+        y_norm_bf16,
+        H_post_activated,
+        M,
+    )
+    return output

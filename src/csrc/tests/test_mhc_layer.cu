@@ -239,7 +239,7 @@ bool test_dynamic_path() {
     const int C = 64;
     const int n = 4;
 
-    printf("\nTesting Dynamic H Path (this is how the paper is implementing mHC layer)\n");
+    printf("\nTesting Dynamic H Path (per-batch H values)\n");
     printf("-----------------------------------------------------------\n");
     printf("Batch: %d, Hidden: %d, Expansion: %d\n\n", B, C, n);
 
