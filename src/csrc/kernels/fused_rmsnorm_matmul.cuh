@@ -305,6 +305,18 @@ inline void matmul_forward(MatmulDescriptors& desc, float* out, const floatX* A,
                                 &desc.heuristic.algo, desc.workspace, desc.workspace_size, stream));
 }
 
+// @bench fused_rmsnorm_matmul
+// @title: Fused RMSNorm + MatMul
+// @configs: (M,N,K) =
+// [(128,4096,4096),(256,4096,4096),(512,4096,4096),(1024,4096,4096),(2048,4096,4096),(1024,8192,4096),(2048,8192,4096)]
+// @in: inp floatX[M * K] bf16(-1,1), weight floatX[N * K] bf16(0.75,1.25)
+// @out: out float[M * N]
+// @tflops: 2.0 * (double)M * (double)N * (double)K
+// @bandwidth: M * K * sizeof(floatX) + N * K * sizeof(floatX) + M * N * sizeof(float)
+// @setup: FusedRMSNormMatmul fused;
+// @setup: fused.init(M, N, K);
+// @call: fused.forward(d_out, d_inp, d_weight)
+// @cleanup: fused.destroy();
 struct FusedRMSNormMatmul {
     MatmulDescriptors matmul_desc;
     float* rms_buffer;
@@ -533,6 +545,30 @@ __global__ void rms_correction_kernel(float* __restrict__ dx, const float* __res
     }
 }
 
+// @bench fused_rmsnorm_matmul_backward
+// @title: Fused RMSNorm + MatMul Backward
+// @configs: (M,N,K) =
+// [(128,4096,4096),(256,4096,4096),(512,4096,4096),(1024,4096,4096),(2048,4096,4096),(1024,8192,4096),(2048,8192,4096)]
+// @in: inp floatX[M * K] bf16(-1,1), weight floatX[N * K] bf16(0.75,1.25),
+// grad float[M * N] random(-1,1,43), rms float[M] computed
+// @out: dW float[N * K], dx float[M * K]
+// @setup: for (int i = 0; i < M; i++) {
+// @setup:     float sum_sq = 0.0f;
+// @setup:     for (int j = 0; j < K; j++) {
+// @setup:         float v = (float)h_inp.ptr[i * K + j];
+// @setup:         sum_sq += v * v;
+// @setup:     }
+// @setup:     h_rms.ptr[i] = sqrtf(sum_sq / (float)K + 1e-5f);
+// @setup: }
+// @setup: d_rms.upload(h_rms);
+// @setup: FusedRMSNormMatmulBackward backward;
+// @setup: backward.init(M, N, K);
+// @call: backward.backward(d_dW, d_dx, d_grad, d_inp, d_weight, d_rms)
+// @cleanup: backward.destroy();
+// @pre-iter: d_dW.zero()
+// @tflops: 4.0 * (double)M * (double)N * (double)K
+// @bandwidth: M * K * sizeof(floatX) + N * K * sizeof(floatX) +
+// M * N * sizeof(float) + M * sizeof(float) + N * K * sizeof(float) + M * K * sizeof(float)
 struct FusedRMSNormMatmulBackward {
     cublasLtHandle_t handle;
     cublasLtMatmulDesc_t dW_matmul_desc;

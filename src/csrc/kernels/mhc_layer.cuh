@@ -418,6 +418,77 @@ inline void apply_dynamic_h_activations(float* H_pre_out, float* H_post_out, flo
         alpha_res, B, n);
 }
 
+// @bench mhc_layer_static
+// @group: mhc_layer
+// @title: Static H Path
+// @configs: (B,C,n) =
+// [(64,1280,4),(128,1280,4),(256,1280,4),(320,1280,4),(64,1920,4),(128,1920,4),(64,2560,4),(128,2560,4)]
+// @runs: 50
+// @setup: HostMem<float> h_x_expanded(B * n * C);
+// @setup: HostMem<floatX> h_rmsnorm_weight(C);
+// @setup: HostMem<float> h_H_pre(n);
+// @setup: HostMem<float> h_H_post(n);
+// @setup: HostMem<float> h_H_res(n * n);
+// @setup: fill_random(h_x_expanded, B * n * C);
+// @setup: fill_random_bf16(h_rmsnorm_weight, C, 0.75f, 1.25f);
+// @setup: for (int i = 0; i < n; i++) { h_H_pre.ptr[i] = 0.0f; h_H_post.ptr[i] = 0.0f; }
+// @setup: srand(42);
+// @setup: for (int i = 0; i < n * n; i++) { h_H_res.ptr[i] = 0.01f * ((float)rand() / RAND_MAX
+// * 2.0f - 1.0f); }
+// @setup: DeviceMem<float> d_x_expanded(B * n * C);
+// @setup: d_x_expanded.upload(h_x_expanded);
+// @setup: MHCLayerConfig cfg;
+// @setup: cfg.batch_size = B; cfg.hidden_dim = C; cfg.expansion_rate = n;
+// @setup: cfg.sinkhorn_iters = 20; cfg.eps = 1e-5f; cfg.use_pdl = true; cfg.use_dynamic_h = false;
+// @setup: MHCLayer layer;
+// @setup: layer.init(cfg);
+// @setup: layer.set_weights(h_rmsnorm_weight, h_H_pre, h_H_post, h_H_res);
+// @setup: layer.sync();
+// @setup: layer.forward_device(d_x_expanded);
+// @setup: layer.sync();
+// @bandwidth: (size_t)B * n * C * sizeof(float) * 3
+// @metric: Samples/sec = B / (avg_time_ms / 1000.0f)
+// @call: layer.forward_device(d_x_expanded)
+// @cleanup: layer.destroy();
+
+// @bench mhc_layer_dynamic
+// @group: mhc_layer
+// @title: Dynamic H Path
+// @configs: (B,C,n) =
+// [(64,1280,4),(128,1280,4),(256,1280,4),(320,1280,4),(64,1920,4),(128,1920,4),(64,2560,4),(128,2560,4)]
+// @runs: 50
+// @setup: int nC = n * C;
+// @setup: int total_H_dim = n + n + n * n;
+// @setup: HostMem<float> h_x_expanded(B * n * C);
+// @setup: HostMem<floatX> h_rmsnorm_weight(C);
+// @setup: HostMem<floatX> h_phi(total_H_dim * nC);
+// @setup: HostMem<float> h_b_pre(n);
+// @setup: HostMem<float> h_b_post(n);
+// @setup: HostMem<float> h_b_res(n * n);
+// @setup: fill_random(h_x_expanded, B * n * C);
+// @setup: fill_random_bf16(h_rmsnorm_weight, C, 0.75f, 1.25f);
+// @setup: fill_random_bf16(h_phi, total_H_dim * nC, -0.05f, 0.05f, 43);
+// @setup: for (int i = 0; i < n; i++) { h_b_pre.ptr[i] = 0.0f; h_b_post.ptr[i] = 0.0f; }
+// @setup: srand(42);
+// @setup: for (int i = 0; i < n * n; i++) { h_b_res.ptr[i] = 0.01f * ((float)rand() / RAND_MAX
+// * 2.0f - 1.0f); }
+// @setup: DeviceMem<float> d_x_expanded(B * n * C);
+// @setup: d_x_expanded.upload(h_x_expanded);
+// @setup: MHCLayerConfig cfg;
+// @setup: cfg.batch_size = B; cfg.hidden_dim = C; cfg.expansion_rate = n;
+// @setup: cfg.sinkhorn_iters = 20; cfg.eps = 1e-5f; cfg.use_pdl = true; cfg.use_dynamic_h = true;
+// @setup: MHCLayer layer;
+// @setup: layer.init(cfg);
+// @setup: floatX* phi_base = h_phi;
+// @setup: layer.set_weights_dynamic(h_rmsnorm_weight, phi_base, phi_base + n * nC, phi_base + 2 * n
+// * nC, h_b_pre, h_b_post, h_b_res, 0.01f, 0.01f, 0.01f);
+// @setup: layer.sync();
+// @setup: layer.forward_device(d_x_expanded);
+// @setup: layer.sync();
+// @bandwidth: (size_t)B * n * C * sizeof(float) * 3
+// @metric: Samples/sec = B / (avg_time_ms / 1000.0f)
+// @call: layer.forward_device(d_x_expanded)
+// @cleanup: layer.destroy();
 struct MHCLayer {
     MHCLayerConfig config;
     MHCLayerWeights weights;

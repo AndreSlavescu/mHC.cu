@@ -67,6 +67,14 @@ class BenchSpec:
         default_factory=list
     )  # code after device allocs (e.g. host compute + upload)
     call_args: list = field(default_factory=list)  # ordered arg names for function call
+    call_expr: str = (
+        ""  # override for the bench_kernel call (e.g. "fused.forward(...)")
+    )
+    cleanup_lines: list = field(
+        default_factory=list
+    )  # code after bench loop (e.g. "fused.destroy()")
+    tflops_expr: str = ""  # FLOPs expression for TFLOPS metric (separate from GFLOPS)
+    metrics: list = field(default_factory=list)  # custom metrics: [(name, expr), ...]
     title: str = ""  # section title override
 
 
@@ -87,8 +95,8 @@ def parse_annotation_block(lines: list[str]) -> dict[str, list[str]]:
             if m:
                 current_key = m.group(1)
                 val = m.group(2)
-                # Strip for non-setup keys (setup/pre-setup preserve indentation)
-                if current_key in ("setup", "pre-setup"):
+                # Strip for non-setup keys (setup/pre-setup/cleanup preserve indentation)
+                if current_key in ("setup", "pre-setup", "cleanup"):
                     val = val.rstrip()
                 else:
                     val = val.strip()
@@ -252,26 +260,33 @@ def scan_kernel_file(filepath: Path) -> list[BenchSpec]:
             else:
                 break
 
-        # Skip blank lines between annotation and function
-        while i < len(lines) and not lines[i].strip():
-            i += 1
-
-        # Collect function signature (until opening brace)
-        sig_lines = []
-        while i < len(lines):
-            sig_lines.append(lines[i])
-            if "{" in lines[i]:
-                break
-            i += 1
-
-        sig_text = " ".join(l.strip() for l in sig_lines)
-        # Remove the { and everything after
-        sig_text = sig_text[: sig_text.index("{")]
-
-        func_name, params = parse_func_signature(sig_text)
-
-        # Parse annotation block
+        # Parse annotation block first to check for @call
         ann = parse_annotation_block(block_lines)
+
+        # If @call is present, function signature is optional
+        call_expr = " ".join(ann.get("call", []))
+        if call_expr:
+            # No function signature to parse — don't advance i
+            func_name = ""
+            params = []
+        else:
+            # Skip blank lines between annotation and function
+            while i < len(lines) and not lines[i].strip():
+                i += 1
+
+            # Collect function signature (until opening brace)
+            sig_lines = []
+            while i < len(lines):
+                sig_lines.append(lines[i])
+                if "{" in lines[i]:
+                    break
+                i += 1
+
+            sig_text = " ".join(l.strip() for l in sig_lines)
+            # Remove the { and everything after
+            sig_text = sig_text[: sig_text.index("{")]
+
+            func_name, params = parse_func_signature(sig_text)
 
         # Build BenchSpec
         bench_name = ann.get("bench", [""])[0] or func_name
@@ -310,12 +325,21 @@ def scan_kernel_file(filepath: Path) -> list[BenchSpec]:
 
         # Parse other fields
         flops_expr = " ".join(ann.get("flops", []))
+        tflops_expr = " ".join(ann.get("tflops", []))
         bandwidth_expr = " ".join(ann.get("bandwidth", []))
         runs = int(ann.get("runs", ["100"])[0])
         pre_iter = " ".join(ann.get("pre-iter", []))
         pre_setup_lines = ann.get("pre-setup", [])
         setup_lines = ann.get("setup", [])
+        cleanup_lines = ann.get("cleanup", [])
         title = " ".join(ann.get("title", []))
+
+        # Parse custom metrics: "name=expression"
+        metrics = []
+        for m in ann.get("metric", []):
+            if "=" in m:
+                mname, mexpr = m.split("=", 1)
+                metrics.append((mname.strip(), mexpr.strip()))
 
         # Determine call args from function params
         call_args = []
@@ -336,6 +360,7 @@ def scan_kernel_file(filepath: Path) -> list[BenchSpec]:
             buffers=buffers,
             scalars=scalars,
             flops_expr=flops_expr,
+            tflops_expr=tflops_expr,
             bandwidth_expr=bandwidth_expr,
             profile=profile,
             runs=runs,
@@ -343,6 +368,9 @@ def scan_kernel_file(filepath: Path) -> list[BenchSpec]:
             pre_setup_lines=pre_setup_lines,
             setup_lines=setup_lines,
             call_args=call_args,
+            call_expr=call_expr,
+            cleanup_lines=cleanup_lines,
+            metrics=metrics,
             title=title,
         )
         specs.append(spec)
@@ -470,29 +498,9 @@ def generate_section(spec: BenchSpec, is_grouped: bool) -> list[str]:
     # Determine which columns to print
     dims = spec.configs_dims
     has_flops = bool(spec.flops_expr)
+    has_tflops = bool(spec.tflops_expr)
     has_per_iter = "num_iters" in dims or "iters" in dims
-
-    # Build printf header
-    col_headers = []
-    col_fmts = []
-    for d in dims:
-        col_headers.append(f'"{d}"')
-        col_fmts.append("%8d" if d not in ("iters", "num_iters") else "%6d")
-
-    col_headers.append('"Time (us)"')
-    col_fmts.append("%12.2f")
-
-    if has_per_iter:
-        col_headers.append('"us/iter"')
-        col_fmts.append("%10.2f")
-
-    if has_flops:
-        # Use TFLOPS for large operations, GFLOPS for small
-        col_headers.append('"GFLOPS"')
-        col_fmts.append("%10.2f")
-
-    col_headers.append('"Bandwidth (GB/s)"')
-    col_fmts.append("%12.2f" if has_flops else "%12.0f")
+    has_bw = bool(spec.bandwidth_expr) or bool(spec.buffers)
 
     # Compute column widths and format strings
     col_widths = []
@@ -514,14 +522,24 @@ def generate_section(spec: BenchSpec, is_grouped: bool) -> list[str]:
         fmt_parts_v.append("%10.2f")
         header_args_h.append('"us/iter"')
 
-    if has_flops:
+    if has_tflops:
+        col_widths.append(12)
+        fmt_parts_v.append("%12.2f")
+        header_args_h.append('"TFLOPS"')
+    elif has_flops:
         col_widths.append(10)
         fmt_parts_v.append("%10.2f")
         header_args_h.append('"GFLOPS"')
 
-    col_widths.append(12)
-    fmt_parts_v.append("%12.2f" if has_flops else "%12.0f")
-    header_args_h.append('"Bandwidth (GB/s)"')
+    if has_bw:
+        col_widths.append(12)
+        fmt_parts_v.append("%12.2f" if (has_flops or has_tflops) else "%12.0f")
+        header_args_h.append('"Bandwidth (GB/s)"')
+
+    for mname, _mexpr in spec.metrics:
+        col_widths.append(14)
+        fmt_parts_v.append("%14.0f")
+        header_args_h.append(f'"{mname}"')
 
     # Build format strings (space-separated)
     fmt_str_h = " ".join(f"%{w}s" for w in col_widths)
@@ -583,13 +601,23 @@ def generate_section(spec: BenchSpec, is_grouped: bool) -> list[str]:
     code.append("")
 
     # Bandwidth computation
-    bw_expr = spec.bandwidth_expr or compute_bandwidth_expr(spec.buffers)
+    bw_expr = spec.bandwidth_expr or (
+        compute_bandwidth_expr(spec.buffers) if spec.buffers else ""
+    )
     if bw_expr:
         code.append(f"        size_t total_bytes = {bw_expr};")
         code.append("")
 
+    # Flops computation (declare before bench_kernel for TFLOPS)
+    if has_tflops:
+        code.append(f"        double flops = {spec.tflops_expr};")
+        code.append("")
+
     # Bench kernel call
-    call = f"{fn}({build_call_args(spec)})"
+    if spec.call_expr:
+        call = spec.call_expr
+    else:
+        call = f"{fn}({build_call_args(spec)})"
     if spec.pre_iter:
         code.append("        float avg_time_ms = bench_kernel(")
         code.append(f"            [&]() {{ {call}; }},")
@@ -612,13 +640,19 @@ def generate_section(spec: BenchSpec, is_grouped: bool) -> list[str]:
     if has_per_iter:
         code.append(f"        float time_per_iter_us = time_us / {iter_dim};")
 
-    if has_flops:
+    if has_tflops:
+        code.append("        float tflops = (flops / 1e12f) / (avg_time_ms / 1e3f);")
+    elif has_flops:
         code.append(
             f"        float gflops = (({spec.flops_expr}) / 1e9f) / (avg_time_ms / 1e3f);"
         )
 
     if bw_expr:
         code.append("        float bw = (total_bytes / 1e9f) / (avg_time_ms / 1e3f);")
+
+    for mname, mexpr in spec.metrics:
+        varname = mname.lower().replace("/", "_per_").replace(" ", "_")
+        code.append(f"        float {varname} = {mexpr};")
 
     code.append("")
 
@@ -629,12 +663,24 @@ def generate_section(spec: BenchSpec, is_grouped: bool) -> list[str]:
     val_args.append("time_us")
     if has_per_iter:
         val_args.append("time_per_iter_us")
-    if has_flops:
+    if has_tflops:
+        val_args.append("tflops")
+    elif has_flops:
         val_args.append("gflops")
     if bw_expr:
         val_args.append("bw")
+    for mname, _mexpr in spec.metrics:
+        varname = mname.lower().replace("/", "_per_").replace(" ", "_")
+        val_args.append(varname)
 
     code.append(f'        printf("{fmt_str_v}\\n", {", ".join(val_args)});')
+
+    # Cleanup code (per-config, e.g. fused.destroy())
+    if spec.cleanup_lines:
+        code.append("")
+        for cl in spec.cleanup_lines:
+            code.append(f"        {cl}")
+
     code.append("    }")
     code.append("")
 
