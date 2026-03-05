@@ -322,6 +322,14 @@ class StreamMixTC {
     }
 };
 
+// @bench stream_aggregate_bf16_fused_sigmoid
+// @group: stream_ops
+// @title: stream_aggregate_bf16_fused_sigmoid
+// @configs: (B,n,C) = [(320,4,1280),(512,4,1920),(1280,4,2560),(2560,4,1280)]
+// @in: inp float[B * n * C] random(-1,1), H_pre_raw float[n] zero
+// @out: out float[B * C]
+// @extra-buf: H_pre_activated float[n]
+// @bandwidth: (B * n * C + n) * sizeof(float) + B * C * sizeof(float)
 inline void stream_aggregate_bf16_fused_sigmoid(float* out, float* H_pre_activated,
                                                 const float* inp, const float* H_pre_raw, int B,
                                                 int n, int C, cudaStream_t stream = nullptr) {
@@ -399,6 +407,16 @@ inline void stream_aggregate_bf16_fused_sigmoid(float* out, float* H_pre_activat
     }
 }
 
+// @bench stream_distribute_mix_add_fused
+// @group: stream_ops
+// @title: stream_distribute_mix_add_fused
+// @configs: (B,n,C) = [(320,4,1280),(512,4,1920),(1280,4,2560),(2560,4,1280)]
+// @in: x_inp float[B * n * C] random(-1,1), y_norm float[B * C] random(-1,1,43), H_post_raw
+// float[n] zero, M float[n * n] ones(1.0/n)
+// @out: out float[B * n * C]
+// @extra-buf: H_post_activated float[n]
+// @bandwidth: (B * n * C + n * n + n) * sizeof(float) + B * C * sizeof(float) + B * n * C *
+// sizeof(float)
 inline void stream_distribute_mix_add_fused(float* out, float* H_post_activated, const float* x_inp,
                                             const float* y_norm, const float* H_post_raw,
                                             const float* M, int B, int n, int C,
@@ -910,6 +928,16 @@ __global__ __launch_bounds__(256, 4) void reduce_partials_kernel(float* __restri
     }
 }
 
+// @bench stream_aggregate_backward
+// @group: stream_ops_backward
+// @title: stream_aggregate_backward
+// @configs: (B,n,C) = [(320,4,1280),(512,4,1920),(1280,4,2560),(2560,4,1280)]
+// @in: inp float[B * n * C] random(-1,1), H_pre float[n] zero, grad float[B * C] random(-1,1,43)
+// @out: d_inp float[B * n * C], d_H_pre float[n]
+// @pre-setup: constexpr int BLOCK = 256;
+// @pre-setup: int workspace_num_blocks = std::min(128, (B * C + BLOCK - 1) / BLOCK);
+// @extra-buf: workspace float[workspace_num_blocks * n] zero
+// @bandwidth: (B * n * C + B * C + n) * sizeof(float) + (B * n * C + n) * sizeof(float)
 inline void stream_aggregate_backward(float* d_inp, float* d_H_pre, const float* grad,
                                       const float* inp, const float* H_pre, int B, int n, int C,
                                       float* workspace, int workspace_num_blocks,
@@ -1134,6 +1162,19 @@ __global__ __launch_bounds__(256, 4) void reduce_partials_matrix_kernel(
     }
 }
 
+// @bench stream_distribute_mix_backward_fused
+// @group: stream_ops_backward
+// @title: stream_distribute_mix_backward_fused
+// @configs: (B,n,C) = [(320,4,1280),(512,4,1920),(1280,4,2560),(2560,4,1280)]
+// @in: x float[B * n * C] random(-1,1), y_norm float[B * C] random(-1,1,43), M float[n * n]
+// ones(1.0/n), H_post float[n] zero, grad float[B * n * C] random(-1,1,44)
+// @out: d_x float[B * n * C], d_y_norm float[B * C], d_M float[n * n], d_H_post float[n]
+// @pre-setup: constexpr int BLOCK = 256;
+// @pre-setup: int workspace_num_blocks = std::min(128, (B * C + BLOCK - 1) / BLOCK);
+// @extra-buf: workspace_M float[workspace_num_blocks * n * n] zero, workspace_H
+// float[workspace_num_blocks * n] zero
+// @bandwidth: (2 * B * n * C + B * C + n * n + n) * sizeof(float) + (B * n * C + B * C + n * n + n)
+// * sizeof(float)
 inline void stream_distribute_mix_backward_fused(float* d_x, float* d_y_norm, float* d_M,
                                                  float* d_H_post, const float* grad, const float* x,
                                                  const float* y_norm, const float* M,

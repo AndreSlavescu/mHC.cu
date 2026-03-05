@@ -6,6 +6,7 @@
 #include <cooperative_groups/reduce.h>
 #include "../include/mhc_types.h"
 #include "../include/utils.cuh"
+#include "../include/profiling.cuh"
 
 namespace cg = cooperative_groups;
 
@@ -301,10 +302,10 @@ __global__ __launch_bounds__(BLOCK_SIZE,
     }
 }
 
-template<int MAX_DIM, int BLOCK_SIZE>
+template<int MAX_DIM, int BLOCK_SIZE, bool DO_PROFILE = false>
 __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_single_block_kernel(
-    float* __restrict__ out, const float* __restrict__ inp, int M, int N, int num_iters,
-    float eps) {
+    float* __restrict__ out, const float* __restrict__ inp, int M, int N, int num_iters, float eps,
+    int64_t* profiler_buf = nullptr, int max_entries = 0) {
     extern __shared__ float smem[];
     float* tile = smem;
     float* row_sums = smem + MAX_DIM * MAX_DIM;
@@ -312,10 +313,15 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_single_block_ker
 
     int total_elems = M * N;
 
+    MHC_PROFILE_INIT(blockIdx.x);
+    MHC_PROFILE_START(TagLoad);
+
     for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
         tile[i] = inp[i];
     }
     __syncthreads();
+
+    MHC_PROFILE_PHASE(TagCompute);
 
     for (int iter = 0; iter < num_iters; iter++) {
         for (int r = threadIdx.x; r < M; r += BLOCK_SIZE) {
@@ -355,21 +361,28 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_single_block_ker
         __syncthreads();
     }
 
+    MHC_PROFILE_PHASE(TagStore);
+
     for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
         out[i] = tile[i];
     }
+
+    MHC_PROFILE_END();
 }
 
-template<int MAX_DIM, int BLOCK_SIZE>
+template<int MAX_DIM, int BLOCK_SIZE, bool DO_PROFILE = false>
 __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_single_block_fused_exp_kernel(
     float* __restrict__ out, float* __restrict__ H_res_exp, const float* __restrict__ inp, int M,
-    int N, int num_iters, float eps) {
+    int N, int num_iters, float eps, int64_t* profiler_buf = nullptr, int max_entries = 0) {
     extern __shared__ float smem[];
     float* tile = smem;
     float* row_sums = smem + MAX_DIM * MAX_DIM;
     float* col_sums = row_sums + MAX_DIM;
 
     int total_elems = M * N;
+
+    MHC_PROFILE_INIT(blockIdx.x);
+    MHC_PROFILE_START(TagLoad);
 
     for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
         float val = fast_exp(inp[i]);
@@ -378,6 +391,8 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_single_block_fus
             H_res_exp[i] = val;
     }
     __syncthreads();
+
+    MHC_PROFILE_PHASE(TagCompute);
 
     for (int iter = 0; iter < num_iters; iter++) {
         for (int r = threadIdx.x; r < M; r += BLOCK_SIZE) {
@@ -417,11 +432,26 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_single_block_fus
         __syncthreads();
     }
 
+    MHC_PROFILE_PHASE(TagStore);
+
     for (int i = threadIdx.x; i < total_elems; i += BLOCK_SIZE) {
         out[i] = tile[i];
     }
+
+    MHC_PROFILE_END();
 }
 
+// @bench sinkhorn_knopp_forward
+// @group: sinkhorn_knopp
+// @title: Sinkhorn-Knopp Forward
+// @configs: (M,N,num_iters) =
+// [(32,32,5),(32,32,10),(32,32,20),(64,64,5),(64,64,10),(64,64,20),(128,128,5),(128,128,10),(128,128,20)]
+// @in: inp float[M * N] random(0.1,1.1)
+// @out: out float[M * N]
+// @scalar: eps=1e-8f
+// @flops: 4.0 * M * N * num_iters
+// @profile: sinkhorn_knopp_forward_profiled M=64 N=64 num_iters=10 grid=1 timeline=true
+// timeline_blocks=1
 inline void sinkhorn_knopp_forward(float* out, const float* inp, int M, int N, int num_iters,
                                    float eps, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 256;
@@ -448,7 +478,7 @@ inline void sinkhorn_knopp_forward(float* out, const float* inp, int M, int N, i
         auto kernel = sinkhorn_knopp_single_block_kernel<MAX_DIM, BLOCK_SIZE>;
         cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
 
-        kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps);
+        kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps, nullptr, 0);
     } else {
         constexpr int TILE_SIZE = 32;
         dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
@@ -460,6 +490,17 @@ inline void sinkhorn_knopp_forward(float* out, const float* inp, int M, int N, i
     }
 }
 
+// @bench sinkhorn_knopp_forward_fused_exp
+// @group: sinkhorn_knopp
+// @title: Fused Exp Version (as used in MHCLayer)
+// @configs: (M,N,num_iters) =
+// [(32,32,5),(32,32,10),(32,32,20),(64,64,5),(64,64,10),(64,64,20),(128,128,5),(128,128,10),(128,128,20)]
+// @in: inp float[M * N] random(-0.01,0.01)
+// @out: out float[M * N]
+// @extra-buf: H_res_exp float[M * N]
+// @scalar: eps=1e-8f
+// @profile: sinkhorn_knopp_forward_fused_exp_profiled M=64 N=64 num_iters=10 grid=1 timeline=true
+// timeline_blocks=1
 inline void sinkhorn_knopp_forward_fused_exp(float* out, float* H_res_exp, const float* inp, int M,
                                              int N, int num_iters, float eps,
                                              cudaStream_t stream = nullptr) {
@@ -485,7 +526,7 @@ inline void sinkhorn_knopp_forward_fused_exp(float* out, float* H_res_exp, const
 
         cudaLaunchKernelEx(&config,
                            sinkhorn_knopp_single_block_fused_exp_kernel<MAX_DIM, BLOCK_SIZE>, out,
-                           H_res_exp, inp, M, N, num_iters, eps);
+                           H_res_exp, inp, M, N, num_iters, eps, (int64_t*)nullptr, 0);
 #else
         sinkhorn_knopp_single_block_fused_exp_kernel<MAX_DIM, BLOCK_SIZE>
             <<<1, BLOCK_SIZE, smem_size, stream>>>(out, H_res_exp, inp, M, N, num_iters, eps);
@@ -511,9 +552,11 @@ inline void sinkhorn_knopp_forward_fused_exp(float* out, float* H_res_exp, const
         config.dynamicSmemBytes = smem_size;
         config.stream = stream;
 
-        cudaLaunchKernelEx(&config, kernel, out, H_res_exp, inp, M, N, num_iters, eps);
+        cudaLaunchKernelEx(&config, kernel, out, H_res_exp, inp, M, N, num_iters, eps,
+                           (int64_t*)nullptr, 0);
 #else
-        kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, H_res_exp, inp, M, N, num_iters, eps);
+        kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, H_res_exp, inp, M, N, num_iters, eps,
+                                                     nullptr, 0);
 #endif
     } else {
         fprintf(stderr, "sinkhorn_knopp_forward_fused_exp: M > 128 or N > 128 not supported\n");
@@ -690,10 +733,11 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_backward_checkpo
     }
 }
 
-template<int MAX_DIM, int BLOCK_SIZE>
+template<int MAX_DIM, int BLOCK_SIZE, bool DO_PROFILE = false>
 __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_backward_kernel(
     float* __restrict__ d_inp, const float* __restrict__ grad, const float* __restrict__ M_out,
-    const float* __restrict__ M_inp, int N, int num_iters, float eps) {
+    const float* __restrict__ M_inp, int N, int num_iters, float eps,
+    int64_t* profiler_buf = nullptr, int max_entries = 0) {
     extern __shared__ float smem[];
     float* d_tile = smem;
     float* row_buffer = smem + MAX_DIM * MAX_DIM;
@@ -704,10 +748,15 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_backward_kernel(
 
     int total = N * N;
 
+    MHC_PROFILE_INIT(blockIdx.x);
+    MHC_PROFILE_START(TagLoad);
+
     for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
         d_tile[i] = grad[i];
     }
     __syncthreads();
+
+    MHC_PROFILE_PHASE(TagCompute);
 
     for (int iter = num_iters - 1; iter >= 0; iter--) {
         for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
@@ -793,11 +842,28 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void sinkhorn_knopp_backward_kernel(
         __syncthreads();
     }
 
+    MHC_PROFILE_PHASE(TagStore);
+
     for (int i = threadIdx.x; i < total; i += BLOCK_SIZE) {
         d_inp[i] = d_tile[i];
     }
+
+    MHC_PROFILE_END();
 }
 
+// @bench sinkhorn_knopp_backward
+// @title: Sinkhorn-Knopp Backward
+// @configs: (M,N,num_iters) = [(32,32,5),(32,32,10),(32,32,20),(64,64,5),(64,64,10),(64,64,20)]
+// @in: M_inp float[M * N] random(0.1,1.1), grad float[M * N] random(-1,1,43)
+// @out: d_inp float[M * N]
+// @extra-buf: M_out float[M * N]
+// @scalar: eps=1e-8f
+// @flops: 8.0 * M * N * num_iters
+// @bandwidth: 4 * M * N * sizeof(float)
+// @setup: sinkhorn_knopp_forward(d_M_out, d_M_inp, M, N, num_iters, eps);
+// @setup: CHECK_CUDA(cudaDeviceSynchronize());
+// @profile: sinkhorn_knopp_backward_profiled M=64 N=64 num_iters=10 grid=1 timeline=true
+// timeline_blocks=1
 inline void sinkhorn_knopp_backward(float* d_inp, const float* grad, const float* M_out,
                                     const float* M_inp, int N, int num_iters, float eps,
                                     cudaStream_t stream = nullptr) {
@@ -1233,6 +1299,78 @@ inline void sinkhorn_knopp_backward_batched(float* d_inp, const float* grad, con
     for (int b = 0; b < B; b++) {
         sinkhorn_knopp_backward(d_inp + b * n * n, grad + b * n * n, nullptr, M_inp + b * n * n, n,
                                 num_iters, eps, stream);
+    }
+}
+
+// Profiled dispatch variants — call production kernels with DO_PROFILE=true.
+
+inline void sinkhorn_knopp_forward_profiled(float* out, const float* inp, int M, int N,
+                                            int num_iters, float eps, int64_t* profiler_buf,
+                                            int max_entries, cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    if (M <= 64 && N <= 64) {
+        constexpr int MAX_DIM = 64;
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+
+        sinkhorn_knopp_single_block_kernel<MAX_DIM, BLOCK_SIZE, true>
+            <<<1, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps, profiler_buf,
+                                                   max_entries);
+    } else if (M <= 128 && N <= 128) {
+        constexpr int MAX_DIM = 128;
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+
+        auto kernel = sinkhorn_knopp_single_block_kernel<MAX_DIM, BLOCK_SIZE, true>;
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+        kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, inp, M, N, num_iters, eps, profiler_buf,
+                                                     max_entries);
+    }
+}
+
+inline void sinkhorn_knopp_forward_fused_exp_profiled(float* out, float* H_res_exp,
+                                                      const float* inp, int M, int N, int num_iters,
+                                                      float eps, int64_t* profiler_buf,
+                                                      int max_entries,
+                                                      cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    if (M <= 64 && N <= 64) {
+        constexpr int MAX_DIM = 64;
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+
+        sinkhorn_knopp_single_block_fused_exp_kernel<MAX_DIM, BLOCK_SIZE, true>
+            <<<1, BLOCK_SIZE, smem_size, stream>>>(out, H_res_exp, inp, M, N, num_iters, eps,
+                                                   profiler_buf, max_entries);
+    } else if (M <= 128 && N <= 128) {
+        constexpr int MAX_DIM = 128;
+        size_t smem_size =
+            MAX_DIM * MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float) + MAX_DIM * sizeof(float);
+
+        auto kernel = sinkhorn_knopp_single_block_fused_exp_kernel<MAX_DIM, BLOCK_SIZE, true>;
+        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+
+        kernel<<<1, BLOCK_SIZE, smem_size, stream>>>(out, H_res_exp, inp, M, N, num_iters, eps,
+                                                     profiler_buf, max_entries);
+    }
+}
+
+inline void sinkhorn_knopp_backward_profiled(float* d_inp, const float* grad, const float* M_out,
+                                             const float* M_inp, int N, int num_iters, float eps,
+                                             int64_t* profiler_buf, int max_entries,
+                                             cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 256;
+
+    if (N <= 64) {
+        constexpr int MAX_DIM = 64;
+        size_t smem_size = 2 * MAX_DIM * MAX_DIM * sizeof(float) + 4 * MAX_DIM * sizeof(float);
+
+        sinkhorn_knopp_backward_kernel<MAX_DIM, BLOCK_SIZE, true>
+            <<<1, BLOCK_SIZE, smem_size, stream>>>(d_inp, grad, M_out, M_inp, N, num_iters, eps,
+                                                   profiler_buf, max_entries);
     }
 }
 

@@ -15,6 +15,8 @@ Once the image builds the first time, it will be cached and will not require a r
 
 ### Benchmark
 
+Run benchmark suite
+
 ```bash
 # python bench
 modal run runmodal.py --gpu h100 --mode bench --scope python
@@ -24,6 +26,16 @@ modal run runmodal.py --gpu h100 --mode bench --scope native
 
 # run all benches
 modal run runmodal.py --gpu h100 --mode bench --scope all
+```
+
+Generate benchmark files (this is automatically run in the above)
+
+```bash
+# generate the benchmark files
+make benchgen
+
+# check status of benchmark files
+make benchgen-check
 ```
 
 ### Test
@@ -108,29 +120,19 @@ in section A.1):
 
 | Batch | Hidden | n  | Forward | Backward |
 |-------|--------|----|---------|----------|
-| 320   | 1280   | 4  | 13.2x   | 11.1x    |
-| 512   | 1920   | 4  | 9.0x    | 7.7x     |
-| 1280  | 2560   | 4  | 5.1x    | 3.6x     |
-| 2560  | 1280   | 4  | 5.0x    | 3.5x     |
-| 128   | 1280   | 8  | 13.6x   | 11.5x    |
-| 256   | 1280   | 8  | 10.3x   | 9.8x     |
-| 32    | 1280   | 32 | 5.8x    | 2.9x     |
-| 64    | 1280   | 32 | 4.7x    | 2.2x     |
-| 128   | 1280   | 32 | 3.5x    | 1.5x     |
+| 320   | 1280   | 4  | 15.20x  | 10.07x   |
+| 512   | 1920   | 4  | 10.52x  | 9.20x    |
+| 1280  | 2560   | 4  | 5.66x   | 4.34x    |
+| 2560  | 1280   | 4  | 5.66x   | 4.21x    |
 
 **Dynamic H Path** (per-batch H values computed via Equations 7-9 from paper):
 
 | Batch | Hidden | n  | Forward | Backward |
 |-------|--------|----|---------|----------|
-| 320   | 1280   | 4  | 6.7x    | 11.0x    |
-| 512   | 1920   | 4  | 6.8x    | 9.0x     |
-| 1280  | 2560   | 4  | 4.6x    | 5.1x     |
-| 2560  | 1280   | 4  | 4.6x    | 5.0x     |
-| 128   | 1280   | 8  | 6.4x    | 11.2x    |
-| 256   | 1280   | 8  | 6.1x    | 10.6x    |
-| 32    | 1280   | 32 | 1.9x    | 3.1x     |
-| 64    | 1280   | 32 | 1.8x    | 2.5x     |
-| 128   | 1280   | 32 | 1.7x    | 1.9x     |
+| 320   | 1280   | 4  | 7.39x   | 3.35x    |
+| 512   | 1920   | 4  | 7.38x   | 3.47x    |
+| 1280  | 2560   | 4  | 5.33x   | 3.07x    |
+| 2560  | 1280   | 4  | 5.21x   | 3.02x    |
 
 
 ## Format

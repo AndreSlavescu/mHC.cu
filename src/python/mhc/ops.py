@@ -459,7 +459,7 @@ def mhc_layer_fused_dynamic_inference(
         float(alpha_res.item()) if torch.is_tensor(alpha_res) else float(alpha_res)
     )
     x_f32 = x_expanded.float().contiguous()
-    H_pre_activated, H_post_activated, M = mhc_cuda.mhc_dynamic_h_fwd(
+    H_pre_activated, H_post_activated, M, _rms_h = mhc_cuda.mhc_dynamic_h_fwd(
         x_f32,
         phi_concat,
         alpha_pre_val,

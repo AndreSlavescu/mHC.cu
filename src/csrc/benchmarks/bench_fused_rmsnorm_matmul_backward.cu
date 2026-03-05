@@ -1,10 +1,7 @@
 #include <cstdio>
-#include <cstdlib>
-#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-#include "../include/mhc_types.h"
-#include "../include/utils.cuh"
+#include "../include/bench_harness.cuh"
 #include "../kernels/fused_rmsnorm_matmul.cuh"
 
 using namespace mhc;
@@ -37,43 +34,35 @@ int main() {
         int N = configs[c].N;
         int K = configs[c].K;
 
-        floatX* h_inp = (floatX*)malloc(M * K * sizeof(floatX));
-        floatX* h_weight = (floatX*)malloc(N * K * sizeof(floatX));
-        float* h_grad = (float*)malloc(M * N * sizeof(float));
-        float* h_rms = (float*)malloc(M * sizeof(float));
+        HostMem<floatX> h_inp(M * K);
+        HostMem<floatX> h_weight(N * K);
+        HostMem<float> h_grad(M * N);
+        HostMem<float> h_rms(M);
 
-        srand(42);
-        for (int i = 0; i < M * K; i++) {
-            h_inp[i] = (floatX)((float)rand() / RAND_MAX * 2.0f - 1.0f);
-        }
-        for (int i = 0; i < N * K; i++) {
-            h_weight[i] = (floatX)((float)rand() / RAND_MAX * 0.5f + 0.75f);
-        }
-        for (int i = 0; i < M * N; i++) {
-            h_grad[i] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
-        }
+        fill_random_bf16(h_inp, M * K);
+        fill_random_bf16(h_weight, N * K, 0.75f, 1.25f);
+        fill_random(h_grad, M * N, -1.0f, 1.0f, 43);
+
         for (int i = 0; i < M; i++) {
             float sum_sq = 0.0f;
             for (int j = 0; j < K; j++) {
-                float v = (float)h_inp[i * K + j];
+                float v = (float)h_inp.ptr[i * K + j];
                 sum_sq += v * v;
             }
-            h_rms[i] = sqrtf(sum_sq / (float)K + 1e-5f);
+            h_rms.ptr[i] = sqrtf(sum_sq / (float)K + 1e-5f);
         }
 
-        floatX *d_inp, *d_weight;
-        float *d_grad, *d_rms, *d_dW, *d_dx;
-        CHECK_CUDA(cudaMalloc(&d_inp, M * K * sizeof(floatX)));
-        CHECK_CUDA(cudaMalloc(&d_weight, N * K * sizeof(floatX)));
-        CHECK_CUDA(cudaMalloc(&d_grad, M * N * sizeof(float)));
-        CHECK_CUDA(cudaMalloc(&d_rms, M * sizeof(float)));
-        CHECK_CUDA(cudaMalloc(&d_dW, N * K * sizeof(float)));
-        CHECK_CUDA(cudaMalloc(&d_dx, M * K * sizeof(float)));
+        DeviceMem<floatX> d_inp(M * K);
+        DeviceMem<floatX> d_weight(N * K);
+        DeviceMem<float> d_grad(M * N);
+        DeviceMem<float> d_rms(M);
+        DeviceMem<float> d_dW(N * K);
+        DeviceMem<float> d_dx(M * K);
 
-        CHECK_CUDA(cudaMemcpy(d_inp, h_inp, M * K * sizeof(floatX), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_weight, h_weight, N * K * sizeof(floatX), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_grad, h_grad, M * N * sizeof(float), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_rms, h_rms, M * sizeof(float), cudaMemcpyHostToDevice));
+        d_inp.upload(h_inp);
+        d_weight.upload(h_weight);
+        d_grad.upload(h_grad);
+        d_rms.upload(h_rms);
 
         FusedRMSNormMatmulBackward backward;
         backward.init(M, N, K);
@@ -85,36 +74,16 @@ int main() {
         size_t bytes_write = N * K * sizeof(float) + M * K * sizeof(float);
         size_t total_bytes = bytes_read + bytes_write;
 
-        BenchTimer timer;
-        float total_time = 0.0f;
+        float avg_time_ms =
+            bench_kernel([&]() { backward.backward(d_dW, d_dx, d_grad, d_inp, d_weight, d_rms); },
+                         bench_runs, flusher, [&]() { d_dW.zero(); });
 
-        for (int i = 0; i < bench_runs; i++) {
-            flusher.flush();
-            CHECK_CUDA(cudaMemset(d_dW, 0, N * K * sizeof(float)));
-
-            timer.record_start();
-            backward.backward(d_dW, d_dx, d_grad, d_inp, d_weight, d_rms);
-            timer.record_stop();
-            total_time += timer.elapsed_ms();
-        }
-
-        float avg_time_ms = total_time / bench_runs;
         float tflops = (flops / 1e12f) / (avg_time_ms / 1e3f);
         float bw = (total_bytes / 1e9f) / (avg_time_ms / 1e3f);
 
         printf("%8d %8d %8d %12.2f %12.2f %12.2f\n", M, N, K, avg_time_ms * 1000.0f, tflops, bw);
 
         backward.destroy();
-        cudaFree(d_inp);
-        cudaFree(d_weight);
-        cudaFree(d_grad);
-        cudaFree(d_rms);
-        cudaFree(d_dW);
-        cudaFree(d_dx);
-        free(h_inp);
-        free(h_weight);
-        free(h_grad);
-        free(h_rms);
     }
 
     return 0;

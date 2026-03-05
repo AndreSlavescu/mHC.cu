@@ -5,23 +5,26 @@
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
 #include "../include/mhc_types.h"
+#include "../include/profiling.cuh"
 
 namespace cg = cooperative_groups;
 
 namespace mhc {
 
-template<int BLOCK_SIZE, bool OUTPUT_RMS = false>
-__global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel(float* __restrict__ out,
-                                                                float* __restrict__ rms_out,
-                                                                const float* __restrict__ inp,
-                                                                const floatX* __restrict__ weight,
-                                                                int N, int C, float eps) {
+template<int BLOCK_SIZE, bool OUTPUT_RMS = false, bool DO_PROFILE = false>
+__global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel(
+    float* __restrict__ out, float* __restrict__ rms_out, const float* __restrict__ inp,
+    const floatX* __restrict__ weight, int N, int C, float eps, int64_t* profiler_buf = nullptr,
+    int max_entries = 0) {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
     int idx = blockIdx.x;
     if (idx >= N)
         return;
+
+    MHC_PROFILE_INIT(idx);
+    MHC_PROFILE_START(TagLoad);
 
     const float* x = inp + idx * C;
     float* o = out + idx * C;
@@ -34,6 +37,8 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel(float* __restric
         float val = x[i];
         thread_sum_sq += val * val;
     }
+
+    MHC_PROFILE_PHASE(TagReduce);
 
     float warp_sum = cg::reduce(warp, thread_sum_sq, cg::plus<float>());
 
@@ -61,6 +66,8 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel(float* __restric
     }
     __syncthreads();
 
+    MHC_PROFILE_PHASE(TagStore);
+
     float rms_inv = s_sum_sq[0];
 
     for (int i = threadIdx.x; i < C; i += BLOCK_SIZE) {
@@ -68,18 +75,24 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel(float* __restric
         float w = (float)weight[i];
         o[i] = val * rms_inv * w;
     }
+
+    MHC_PROFILE_END();
 }
 
-template<int BLOCK_SIZE, bool OUTPUT_RMS = false>
+template<int BLOCK_SIZE, bool OUTPUT_RMS = false, bool DO_PROFILE = false>
 __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel_vectorized(
     float* __restrict__ out, float* __restrict__ rms_out, const float* __restrict__ inp,
-    const floatX* __restrict__ weight, int N, int C, float eps) {
+    const floatX* __restrict__ weight, int N, int C, float eps, int64_t* profiler_buf = nullptr,
+    int max_entries = 0) {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
     int idx = blockIdx.x;
     if (idx >= N)
         return;
+
+    MHC_PROFILE_INIT(idx);
+    MHC_PROFILE_START(TagLoad);
 
     const float* x = inp + idx * C;
     float* o = out + idx * C;
@@ -105,6 +118,8 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel_vectorized(
         thread_sum_sq += val * val;
     }
 
+    MHC_PROFILE_PHASE(TagReduce);
+
     float warp_sum = cg::reduce(warp, thread_sum_sq, cg::plus<float>());
 
     int warp_id = threadIdx.x / 32;
@@ -130,6 +145,8 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel_vectorized(
         }
     }
     __syncthreads();
+
+    MHC_PROFILE_PHASE(TagStore);
 
     float rms_inv = s_sum_sq[0];
 
@@ -168,8 +185,20 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_kernel_vectorized(
         float w = (float)weight[i];
         o[i] = val * rms_inv * w;
     }
+
+    MHC_PROFILE_END();
 }
 
+// @bench rmsnorm
+// @title: RMSNorm
+// @configs: (N,C) =
+// [(128,4096),(256,4096),(512,4096),(1024,4096),(2048,4096),(1024,8192),(2048,8192)]
+// @in: inp float[N * C] random(-1,1), weight floatX[C] bf16(0.75,1.25)
+// @out: out float[N * C]
+// @scalar: eps=1e-5f
+// @bandwidth: (size_t)N * C * sizeof(float) + (size_t)C * sizeof(floatX) + (size_t)N * C *
+// sizeof(float)
+// @profile: rmsnorm_forward_profiled N=1024 C=4096 grid=N
 inline void rmsnorm_forward(float* out, const float* inp, const floatX* weight, int N, int C,
                             float eps, cudaStream_t stream = nullptr) {
     constexpr int BLOCK_SIZE = 512;
@@ -213,10 +242,10 @@ inline void rmsnorm_forward_with_rms(float* out, float* rms_out, const float* in
 
     if (C % 8 == 0 && C >= 64) {
         cudaLaunchKernelEx(&config, rmsnorm_kernel_vectorized<BLOCK_SIZE, true>, out, rms_out, inp,
-                           weight, N, C, eps);
+                           weight, N, C, eps, (int64_t*)nullptr, 0);
     } else {
         cudaLaunchKernelEx(&config, rmsnorm_kernel<BLOCK_SIZE, true>, out, rms_out, inp, weight, N,
-                           C, eps);
+                           C, eps, (int64_t*)nullptr, 0);
     }
 #else
     if (C % 8 == 0 && C >= 64) {
@@ -228,17 +257,20 @@ inline void rmsnorm_forward_with_rms(float* out, float* rms_out, const float* in
     }
 #endif
 }
-template<int BLOCK_SIZE>
+template<int BLOCK_SIZE, bool DO_PROFILE = false>
 __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_backward_kernel(
     float* __restrict__ d_inp, float* __restrict__ d_weight, const float* __restrict__ grad,
     const float* __restrict__ inp, const floatX* __restrict__ weight, const float* __restrict__ rms,
-    int N, int C) {
+    int N, int C, int64_t* profiler_buf = nullptr, int max_entries = 0) {
     cg::thread_block block = cg::this_thread_block();
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
 
     int idx = blockIdx.x;
     if (idx >= N)
         return;
+
+    MHC_PROFILE_INIT(idx);
+    MHC_PROFILE_START(TagLoad);
 
     const float* x = inp + idx * C;
     const float* g = grad + idx * C;
@@ -256,6 +288,8 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_backward_kernel(
         float x_val = x[i];
         thread_dot += g_val * w_val * x_val;
     }
+
+    MHC_PROFILE_PHASE(TagReduce);
 
     float warp_dot = cg::reduce(warp, thread_dot, cg::plus<float>());
 
@@ -277,6 +311,8 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_backward_kernel(
     }
     __syncthreads();
 
+    MHC_PROFILE_PHASE(TagStore);
+
     float dot_sum = s_reduce[0];
     float correction = dot_sum / ((float)C * r * r);
 
@@ -289,8 +325,31 @@ __global__ __launch_bounds__(BLOCK_SIZE, 2) void rmsnorm_backward_kernel(
 
         atomicAdd(&d_weight[i], g_val * x_val * r_inv);
     }
+
+    MHC_PROFILE_END();
 }
 
+// @bench rmsnorm_backward
+// @title: RMSNorm Backward
+// @configs: (N,C) =
+// [(128,4096),(256,4096),(512,4096),(1024,4096),(2048,4096),(1024,8192),(2048,8192)]
+// @in: grad float[N * C] random(-1,1,43), inp float[N * C] random(-1,1), weight floatX[C]
+// bf16(0.75,1.25), rms float[N] computed
+// @out: d_inp float[N * C], d_weight float[C]
+// @setup: for (int i = 0; i < N; i++) {
+// @setup:     float sum_sq = 0.0f;
+// @setup:     for (int j = 0; j < C; j++) {
+// @setup:         float v = h_inp.ptr[i * C + j];
+// @setup:         sum_sq += v * v;
+// @setup:     }
+// @setup:     h_rms.ptr[i] = sqrtf(sum_sq / (float)C + 1e-5f);
+// @setup: }
+// @setup: d_rms.upload(h_rms);
+// @pre-iter: d_d_weight.zero()
+// @bandwidth: (size_t)N * C * sizeof(float) + (size_t)C * sizeof(floatX) + (size_t)N * C *
+// sizeof(float) + (size_t)N * sizeof(float) + (size_t)N * C * sizeof(float) + (size_t)C *
+// sizeof(float)
+// @profile: rmsnorm_backward_profiled N=1024 C=4096 grid=N
 inline void rmsnorm_backward(float* d_inp, float* d_weight, const float* grad, const float* inp,
                              const floatX* weight, const float* rms, int N, int C,
                              cudaStream_t stream = nullptr) {
@@ -300,6 +359,39 @@ inline void rmsnorm_backward(float* d_inp, float* d_weight, const float* grad, c
 
     rmsnorm_backward_kernel<BLOCK_SIZE>
         <<<N, BLOCK_SIZE, shared_mem, stream>>>(d_inp, d_weight, grad, inp, weight, rms, N, C);
+}
+
+// Profiled dispatch variants — call production kernels with DO_PROFILE=true.
+
+inline void rmsnorm_forward_profiled(float* out, const float* inp, const floatX* weight, int N,
+                                     int C, float eps, int64_t* profiler_buf, int max_entries,
+                                     cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 512;
+    int num_warps = BLOCK_SIZE / 32;
+    size_t shared_mem = num_warps * sizeof(float);
+
+    dim3 grid(N);
+    dim3 block(BLOCK_SIZE);
+
+    if (C % 8 == 0 && C >= 64) {
+        rmsnorm_kernel_vectorized<BLOCK_SIZE, false, true><<<grid, block, shared_mem, stream>>>(
+            out, nullptr, inp, weight, N, C, eps, profiler_buf, max_entries);
+    } else {
+        rmsnorm_kernel<BLOCK_SIZE, false, true><<<grid, block, shared_mem, stream>>>(
+            out, nullptr, inp, weight, N, C, eps, profiler_buf, max_entries);
+    }
+}
+
+inline void rmsnorm_backward_profiled(float* d_inp, float* d_weight, const float* grad,
+                                      const float* inp, const floatX* weight, const float* rms,
+                                      int N, int C, int64_t* profiler_buf, int max_entries,
+                                      cudaStream_t stream = nullptr) {
+    constexpr int BLOCK_SIZE = 512;
+    int num_warps = BLOCK_SIZE / 32;
+    size_t shared_mem = num_warps * sizeof(float);
+
+    rmsnorm_backward_kernel<BLOCK_SIZE, true><<<N, BLOCK_SIZE, shared_mem, stream>>>(
+        d_inp, d_weight, grad, inp, weight, rms, N, C, profiler_buf, max_entries);
 }
 
 } // namespace mhc

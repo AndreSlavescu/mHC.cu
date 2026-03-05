@@ -1,39 +1,32 @@
 #include <cstdio>
-#include <cstdlib>
 #include <cuda_runtime.h>
-#include <cuda_bf16.h>
+
+#include "bench_harness.cuh"
 #include "mhc_layer.cuh"
-#include "mhc_types.h"
-#include "utils.cuh"
 
 using namespace mhc;
 
 void run_static_benchmark(int B, int C, int n, int bench_runs, L2Flusher& flusher, bool use_tc) {
-    float* h_x_expanded = (float*)malloc(B * n * C * sizeof(float));
-    floatX* h_rmsnorm_weight = (floatX*)malloc(C * sizeof(floatX));
-    float* h_H_pre = (float*)malloc(n * sizeof(float));
-    float* h_H_post = (float*)malloc(n * sizeof(float));
-    float* h_H_res = (float*)malloc(n * n * sizeof(float));
+    HostMem<float> h_x_expanded(B * n * C);
+    HostMem<floatX> h_rmsnorm_weight(C);
+    HostMem<float> h_H_pre(n);
+    HostMem<float> h_H_post(n);
+    HostMem<float> h_H_res(n * n);
 
-    srand(42);
-    for (int i = 0; i < B * n * C; i++) {
-        h_x_expanded[i] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
-    }
-    for (int i = 0; i < C; i++) {
-        h_rmsnorm_weight[i] = (floatX)((float)rand() / RAND_MAX * 0.5f + 0.75f);
-    }
+    fill_random(h_x_expanded, B * n * C);
+    fill_random_bf16(h_rmsnorm_weight, C, 0.75f, 1.25f);
+
     for (int i = 0; i < n; i++) {
-        h_H_pre[i] = 0.0f;
-        h_H_post[i] = 0.0f;
+        h_H_pre.ptr[i] = 0.0f;
+        h_H_post.ptr[i] = 0.0f;
     }
+    srand(42);
     for (int i = 0; i < n * n; i++) {
-        h_H_res[i] = 0.01f * ((float)rand() / RAND_MAX * 2.0f - 1.0f);
+        h_H_res.ptr[i] = 0.01f * ((float)rand() / RAND_MAX * 2.0f - 1.0f);
     }
 
-    float* d_x_expanded;
-    CHECK_CUDA(cudaMalloc(&d_x_expanded, B * n * C * sizeof(float)));
-    CHECK_CUDA(
-        cudaMemcpy(d_x_expanded, h_x_expanded, B * n * C * sizeof(float), cudaMemcpyHostToDevice));
+    DeviceMem<float> d_x_expanded(B * n * C);
+    d_x_expanded.upload(h_x_expanded);
 
     MHCLayerConfig cfg;
     cfg.batch_size = B;
@@ -55,19 +48,9 @@ void run_static_benchmark(int B, int C, int n, int bench_runs, L2Flusher& flushe
 
     size_t bytes_io = (size_t)B * n * C * sizeof(float) * 3;
 
-    BenchTimer timer;
-    float total_time = 0.0f;
+    float avg_time_ms =
+        bench_kernel([&]() { layer.forward_device(d_x_expanded); }, bench_runs, flusher);
 
-    for (int i = 0; i < bench_runs; i++) {
-        flusher.flush();
-
-        timer.record_start();
-        layer.forward_device(d_x_expanded);
-        timer.record_stop();
-        total_time += timer.elapsed_ms();
-    }
-
-    float avg_time_ms = total_time / bench_runs;
     float throughput = B / (avg_time_ms / 1000.0f);
     float bw = (bytes_io / 1e9f) / (avg_time_ms / 1e3f);
 
@@ -75,47 +58,34 @@ void run_static_benchmark(int B, int C, int n, int bench_runs, L2Flusher& flushe
            use_tc ? "TC" : "CUDA CORE", avg_time_ms * 1000.0f, throughput, bw);
 
     layer.destroy();
-    cudaFree(d_x_expanded);
-    free(h_x_expanded);
-    free(h_rmsnorm_weight);
-    free(h_H_pre);
-    free(h_H_post);
-    free(h_H_res);
 }
 
 void run_dynamic_benchmark(int B, int C, int n, int bench_runs, L2Flusher& flusher) {
-    float* h_x_expanded = (float*)malloc(B * n * C * sizeof(float));
-    floatX* h_rmsnorm_weight = (floatX*)malloc(C * sizeof(floatX));
-
     int nC = n * C;
     int total_H_dim = n + n + n * n;
-    floatX* h_phi = (floatX*)malloc(total_H_dim * nC * sizeof(floatX));
-    float* h_b_pre = (float*)malloc(n * sizeof(float));
-    float* h_b_post = (float*)malloc(n * sizeof(float));
-    float* h_b_res = (float*)malloc(n * n * sizeof(float));
 
-    srand(42);
-    for (int i = 0; i < B * n * C; i++) {
-        h_x_expanded[i] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
-    }
-    for (int i = 0; i < C; i++) {
-        h_rmsnorm_weight[i] = (floatX)((float)rand() / RAND_MAX * 0.5f + 0.75f);
-    }
-    for (int i = 0; i < total_H_dim * nC; i++) {
-        h_phi[i] = (floatX)((float)rand() / RAND_MAX * 0.1f - 0.05f);
-    }
+    HostMem<float> h_x_expanded(B * n * C);
+    HostMem<floatX> h_rmsnorm_weight(C);
+    HostMem<floatX> h_phi(total_H_dim * nC);
+    HostMem<float> h_b_pre(n);
+    HostMem<float> h_b_post(n);
+    HostMem<float> h_b_res(n * n);
+
+    fill_random(h_x_expanded, B * n * C);
+    fill_random_bf16(h_rmsnorm_weight, C, 0.75f, 1.25f);
+    fill_random_bf16(h_phi, total_H_dim * nC, -0.05f, 0.05f, 43);
+
     for (int i = 0; i < n; i++) {
-        h_b_pre[i] = 0.0f;
-        h_b_post[i] = 0.0f;
+        h_b_pre.ptr[i] = 0.0f;
+        h_b_post.ptr[i] = 0.0f;
     }
+    srand(42);
     for (int i = 0; i < n * n; i++) {
-        h_b_res[i] = 0.01f * ((float)rand() / RAND_MAX * 2.0f - 1.0f);
+        h_b_res.ptr[i] = 0.01f * ((float)rand() / RAND_MAX * 2.0f - 1.0f);
     }
 
-    float* d_x_expanded;
-    CHECK_CUDA(cudaMalloc(&d_x_expanded, B * n * C * sizeof(float)));
-    CHECK_CUDA(
-        cudaMemcpy(d_x_expanded, h_x_expanded, B * n * C * sizeof(float), cudaMemcpyHostToDevice));
+    DeviceMem<float> d_x_expanded(B * n * C);
+    d_x_expanded.upload(h_x_expanded);
 
     MHCLayerConfig cfg;
     cfg.batch_size = B;
@@ -129,9 +99,10 @@ void run_dynamic_benchmark(int B, int C, int n, int bench_runs, L2Flusher& flush
     MHCLayer layer;
     layer.init(cfg);
 
-    floatX* h_phi_pre = h_phi;
-    floatX* h_phi_post = h_phi + n * nC;
-    floatX* h_phi_res = h_phi + 2 * n * nC;
+    floatX* phi_base = h_phi;
+    floatX* h_phi_pre = phi_base;
+    floatX* h_phi_post = phi_base + n * nC;
+    floatX* h_phi_res = phi_base + 2 * n * nC;
 
     layer.set_weights_dynamic(h_rmsnorm_weight, h_phi_pre, h_phi_post, h_phi_res, h_b_pre, h_b_post,
                               h_b_res, 0.01f, 0.01f, 0.01f);
@@ -142,19 +113,9 @@ void run_dynamic_benchmark(int B, int C, int n, int bench_runs, L2Flusher& flush
 
     size_t bytes_io = (size_t)B * n * C * sizeof(float) * 3;
 
-    BenchTimer timer;
-    float total_time = 0.0f;
+    float avg_time_ms =
+        bench_kernel([&]() { layer.forward_device(d_x_expanded); }, bench_runs, flusher);
 
-    for (int i = 0; i < bench_runs; i++) {
-        flusher.flush();
-
-        timer.record_start();
-        layer.forward_device(d_x_expanded);
-        timer.record_stop();
-        total_time += timer.elapsed_ms();
-    }
-
-    float avg_time_ms = total_time / bench_runs;
     float throughput = B / (avg_time_ms / 1000.0f);
     float bw = (bytes_io / 1e9f) / (avg_time_ms / 1e3f);
 
@@ -162,13 +123,6 @@ void run_dynamic_benchmark(int B, int C, int n, int bench_runs, L2Flusher& flush
            avg_time_ms * 1000.0f, throughput, bw);
 
     layer.destroy();
-    cudaFree(d_x_expanded);
-    free(h_x_expanded);
-    free(h_rmsnorm_weight);
-    free(h_phi);
-    free(h_b_pre);
-    free(h_b_post);
-    free(h_b_res);
 }
 
 int main() {

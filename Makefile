@@ -1,4 +1,4 @@
-.PHONY: all build test test-python bench bench-python clean format lint install install-dev force-install
+.PHONY: all build test test-python bench bench-python clean format lint install install-dev force-install benchgen benchgen-check
 
 CUDA_ARCH ?= "80;86;89;90;100"
 BUILD_DIR = build
@@ -55,11 +55,17 @@ test: build
 test-python: install
 	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 pytest src/python/tests -v
 
-bench: build
+bench: benchgen build
 	@for b in $(BUILD_DIR)/bench_*; do echo "Running $$b..."; $$b; done
 
 bench-python: install
 	LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6 python src/python/benchmarks/bench_layer.py --all-configs --backward
+
+benchgen:
+	python3 scripts/benchgen.py --force
+
+benchgen-check:
+	python3 scripts/benchgen.py --check
 
 clean:
 	rm -rf $(BUILD_DIR) $(STAMP_DIR)

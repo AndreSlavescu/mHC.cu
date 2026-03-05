@@ -1,10 +1,7 @@
 #include <cstdio>
-#include <cstdlib>
-#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-#include "../include/mhc_types.h"
-#include "../include/utils.cuh"
+#include "../include/bench_harness.cuh"
 #include "../kernels/fused_rmsnorm_matmul.cuh"
 
 using namespace mhc;
@@ -37,25 +34,18 @@ int main() {
         int N = configs[c].N;
         int K = configs[c].K;
 
-        floatX* h_inp = (floatX*)malloc(M * K * sizeof(floatX));
-        floatX* h_weight = (floatX*)malloc(N * K * sizeof(floatX));
+        HostMem<floatX> h_inp(M * K);
+        HostMem<floatX> h_weight(N * K);
 
-        srand(42);
-        for (int i = 0; i < M * K; i++) {
-            h_inp[i] = (floatX)((float)rand() / RAND_MAX * 2.0f - 1.0f);
-        }
-        for (int i = 0; i < N * K; i++) {
-            h_weight[i] = (floatX)((float)rand() / RAND_MAX * 0.5f + 0.75f);
-        }
+        fill_random_bf16(h_inp, M * K);
+        fill_random_bf16(h_weight, N * K, 0.75f, 1.25f);
 
-        floatX *d_inp, *d_weight;
-        float* d_out;
-        CHECK_CUDA(cudaMalloc(&d_inp, M * K * sizeof(floatX)));
-        CHECK_CUDA(cudaMalloc(&d_weight, N * K * sizeof(floatX)));
-        CHECK_CUDA(cudaMalloc(&d_out, M * N * sizeof(float)));
+        DeviceMem<floatX> d_inp(M * K);
+        DeviceMem<floatX> d_weight(N * K);
+        DeviceMem<float> d_out(M * N);
 
-        CHECK_CUDA(cudaMemcpy(d_inp, h_inp, M * K * sizeof(floatX), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_weight, h_weight, N * K * sizeof(floatX), cudaMemcpyHostToDevice));
+        d_inp.upload(h_inp);
+        d_weight.upload(h_weight);
 
         FusedRMSNormMatmul fused;
         fused.init(M, N, K);
@@ -66,30 +56,15 @@ int main() {
         size_t bytes_write = M * N * sizeof(float);
         size_t total_bytes = bytes_read + bytes_write;
 
-        BenchTimer timer;
-        float total_time = 0.0f;
+        float avg_time_ms =
+            bench_kernel([&]() { fused.forward(d_out, d_inp, d_weight); }, bench_runs, flusher);
 
-        for (int i = 0; i < bench_runs; i++) {
-            flusher.flush();
-
-            timer.record_start();
-            fused.forward(d_out, d_inp, d_weight);
-            timer.record_stop();
-            total_time += timer.elapsed_ms();
-        }
-
-        float avg_time_ms = total_time / bench_runs;
         float tflops = (flops / 1e12f) / (avg_time_ms / 1e3f);
         float bw = (total_bytes / 1e9f) / (avg_time_ms / 1e3f);
 
         printf("%8d %8d %8d %12.2f %12.2f %12.2f\n", M, N, K, avg_time_ms * 1000.0f, tflops, bw);
 
         fused.destroy();
-        cudaFree(d_inp);
-        cudaFree(d_weight);
-        cudaFree(d_out);
-        free(h_inp);
-        free(h_weight);
     }
 
     return 0;
