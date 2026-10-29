@@ -65,7 +65,7 @@
 #define cudaFuncAttributeMaxDynamicSharedMemorySize hipFuncAttributeMaxDynamicSharedMemorySize
 // hipFuncSetAttribute takes const void*; templated kernel pointers do not convert
 // implicitly under clang overload resolution, so wrap with an explicit cast.
-template <typename FuncT>
+template<typename FuncT>
 static inline hipError_t cudaFuncSetAttribute(FuncT func, hipFuncAttribute attr, int value) {
     return hipFuncSetAttribute(reinterpret_cast<const void*>(func), attr, value);
 }
@@ -130,9 +130,10 @@ static inline hipblasStatus_t cublasLtMatrixLayoutCreate(hipblasLtMatrixLayout_t
                                                          uint64_t cols, int64_t ld) {
     return hipblasLtMatrixLayoutCreate(layout, type, cols, rows, ld);
 }
-static inline hipblasStatus_t cublasLtMatrixLayoutSetAttribute(
-    hipblasLtMatrixLayout_t layout, hipblasLtMatrixLayoutAttribute_t attr, const void* buf,
-    size_t bytes) {
+static inline hipblasStatus_t
+cublasLtMatrixLayoutSetAttribute(hipblasLtMatrixLayout_t layout,
+                                 hipblasLtMatrixLayoutAttribute_t attr, const void* buf,
+                                 size_t bytes) {
     if (attr == HIPBLASLT_MATRIX_LAYOUT_ORDER) {
         return HIPBLAS_STATUS_SUCCESS; // stay column-major
     }
@@ -157,20 +158,20 @@ static inline hipblasStatus_t cublasLtMatmul(
     return st;
 }
 // The heuristic must see the same swapped operands as the matmul; intercept it too.
-static inline hipblasStatus_t cublasLtMatmulAlgoGetHeuristic(
-    hipblasLtHandle_t handle, hipblasLtMatmulDesc_t desc, hipblasLtMatrixLayout_t Adesc,
-    hipblasLtMatrixLayout_t Bdesc, hipblasLtMatrixLayout_t Cdesc, hipblasLtMatrixLayout_t Ddesc,
-    hipblasLtMatmulPreference_t pref, int requestedCount, hipblasLtMatmulHeuristicResult_t* results,
-    int* returnedCount) {
+static inline hipblasStatus_t
+cublasLtMatmulAlgoGetHeuristic(hipblasLtHandle_t handle, hipblasLtMatmulDesc_t desc,
+                               hipblasLtMatrixLayout_t Adesc, hipblasLtMatrixLayout_t Bdesc,
+                               hipblasLtMatrixLayout_t Cdesc, hipblasLtMatrixLayout_t Ddesc,
+                               hipblasLtMatmulPreference_t pref, int requestedCount,
+                               hipblasLtMatmulHeuristicResult_t* results, int* returnedCount) {
     hipblasOperation_t opA, opB;
     size_t sz = sizeof(opA);
     hipblasLtMatmulDescGetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA), &sz);
     hipblasLtMatmulDescGetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB), &sz);
     hipblasLtMatmulDescSetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opB, sizeof(opB));
     hipblasLtMatmulDescSetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opA, sizeof(opA));
-    hipblasStatus_t st = hipblasLtMatmulAlgoGetHeuristic(handle, desc, Bdesc, Adesc, Cdesc, Ddesc,
-                                                         pref, requestedCount, results,
-                                                         returnedCount);
+    hipblasStatus_t st = hipblasLtMatmulAlgoGetHeuristic(
+        handle, desc, Bdesc, Adesc, Cdesc, Ddesc, pref, requestedCount, results, returnedCount);
     hipblasLtMatmulDescSetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSA, &opA, sizeof(opA));
     hipblasLtMatmulDescSetAttribute(desc, HIPBLASLT_MATMUL_DESC_TRANSB, &opB, sizeof(opB));
     return st;
@@ -186,14 +187,14 @@ static inline hipblasStatus_t cublasLtMatmulAlgoGetHeuristic(
 namespace cooperative_groups {
 // HIP_VERSION = MAJOR*10000000 + MINOR*100000 + PATCH; 7.14.x >= 71400000.
 #if !defined(HIP_VERSION) || (HIP_VERSION < 71400000)
-template <typename T> struct plus {
+template<typename T> struct plus {
     __device__ __forceinline__ T operator()(const T& a, const T& b) const { return a + b; }
 };
 #endif
 // CUDA cg::reduce is an all-reduce: every lane receives the full result. Use a
 // butterfly (shfl_xor) over tile.size() (32 for the logical tiles here) so the
 // result is identical in all lanes on both wave32 and wave64.
-template <typename Group, typename T, typename Op>
+template<typename Group, typename T, typename Op>
 __device__ __forceinline__ T reduce(const Group& g, T val, Op op) {
     for (unsigned int offset = g.size() / 2; offset > 0; offset /= 2) {
         val = op(val, g.shfl_xor(val, offset));
