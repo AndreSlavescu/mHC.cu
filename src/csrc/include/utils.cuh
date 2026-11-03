@@ -471,15 +471,27 @@ inline const char* profiler_tag_name(ProfilerTag tag) {
 }
 
 __device__ __forceinline__ int64_t globaltimer() {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIP__)
+    // s_memrealtime exists on CDNA (gfx90a) but not RDNA (gfx1100); the portable
+    // clang intrinsic lowers to the right free-running counter per arch. The
+    // profiler is if-constexpr-disabled by default, so this only needs to
+    // compile and emit a monotonic counter on every target.
+    return (int64_t)__builtin_readcyclecounter();
+#else
     int64_t t;
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)::"memory");
     return t;
+#endif
 }
 
 __device__ __forceinline__ int get_smid() {
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIP__)
+    return (int)__builtin_amdgcn_s_getreg(/*HW_REG_HW_ID, offset 0, size 32*/ 0x0000001e);
+#else
     int sm_id;
     asm volatile("mov.u32 %0, %%smid;" : "=r"(sm_id));
     return sm_id;
+#endif
 }
 
 struct DeviceProfiler {
